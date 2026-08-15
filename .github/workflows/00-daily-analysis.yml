@@ -16,7 +16,7 @@ jobs:
           fetch-depth: 0
       - name: Apply verified patch and clean temporary files
         env:
-          PATCH_B64: >-
+          PATCH_B64: |
             ZGlmZiAtLWdpdCBhLy5lbnYuZXhhbXBsZSBiLy5lbnYuZXhhbXBsZQppbmRleCAzZDM1ZjM1My4u
             NmY4MzA3MDIgMTAwNjQ0Ci0tLSBhLy5lbnYuZXhhbXBsZQorKysgYi8uZW52LmV4YW1wbGUKQEAg
             LTM4Nyw3ICszODcsNyBAQCBHRU1JTklfQVBJX0tFWT0KICMgTWluaU1heCBBUEkgS2V577yIQ29k
