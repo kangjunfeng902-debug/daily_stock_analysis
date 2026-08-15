@@ -84,11 +84,20 @@ _MARKET_GUIDELINES = {
     "cn": {
         "zh": (
             "- 本次分析对象为 **A 股**（中国沪深交易所上市股票）。\n"
-            "- 请关注 A 股特有的涨跌停机制（±10%/±20%/±30%）、T+1 交易制度及相关政策因素。"
+            "- 必须按股票所属板块与特殊处理状态核对适用涨跌幅限制；不同板块、ST/退市整理及新股阶段规则可能不同，"
+            "不得把 ±10%/±20%/±30% 当作所有标的的固定规则。\n"
+            "- 沪深股票买入后通常需到下一交易日方可卖出（T+1）；停牌、一字涨跌停、成交量不足或盘口封单可能导致计划价无法成交，"
+            "操作建议必须说明可执行性与替代条件。\n"
+            "- 有数据时比较标的相对宽基指数与所属行业的同期强弱；缺少基准或行业数据时必须标注缺失，不得凭空计算超额收益。\n"
+            "- 事实证据优先级为公司/交易所正式公告与监管披露 > 有日期的主流财经报道 > 研报或市场观点 > 社交媒体传闻；"
+            "政策、北向资金、龙虎榜和融资融券等信息必须注明日期、口径与来源。"
         ),
         "en": (
             "- This analysis covers a **China A-share** (listed on Shanghai/Shenzhen exchanges).\n"
-            "- Consider A-share-specific rules: daily price limits (±10%/±20%/±30%), T+1 settlement, and PRC policy factors."
+            "- Verify the applicable price-limit regime from the stock's board, special-treatment status, and listing stage; do not assume one fixed 10%/20%/30% limit for every symbol.\n"
+            "- Shanghai/Shenzhen shares bought today generally cannot be sold until the next trading day (T+1). Suspensions, locked limit-up/down bars, thin liquidity, and order-book queues may make a planned price non-executable, so state execution constraints and fallback conditions.\n"
+            "- When data is available, compare the stock with an appropriate broad-market benchmark and its industry over the same window. If benchmark or industry data is missing, label it missing and do not invent excess returns.\n"
+            "- Evidence priority: company/exchange/regulatory filings > dated mainstream financial reporting > research or market commentary > social-media claims. Date and source any policy, Stock Connect, Dragon Tiger list, or margin-financing evidence."
         ),
     },
     "hk": {
