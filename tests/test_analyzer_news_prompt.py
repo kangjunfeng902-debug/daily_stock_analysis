@@ -137,15 +137,38 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
             self.assertIn("`confidence_level` 不得为高", prompt)
 
     def test_analysis_prompt_contains_actionability_guardrails(self) -> None:
-        with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):
-            analyzer = GeminiAnalyzer()
+        with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None), patch.object(
+            GeminiAnalyzer,
+            "_resolve_generation_backend_config",
+            return_value=("litellm", ""),
+        ):
+            analyzer = GeminiAnalyzer(skill_instructions="", default_skill_policy="")
 
         prompt = analyzer._get_analysis_system_prompt("zh", stock_code="002812")
 
         self.assertIn("可操作性与稳定性约束", prompt)
         self.assertIn("不得仅因为单日涨跌", prompt)
         self.assertIn("支撑/压力位", prompt)
-        self.assertIn("洗盘观察", prompt)
+        self.assertIn("条件化关键价位", prompt)
+        self.assertIn("交易计划条件，不是价格预测", prompt)
+        self.assertIn("不得断言“洗盘、吸筹、出货、主力意图”", prompt)
+        self.assertNotIn("精确狙击点", prompt)
+
+    def test_a_share_prompt_requires_execution_and_relative_strength_context(self) -> None:
+        with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None), patch.object(
+            GeminiAnalyzer,
+            "_resolve_generation_backend_config",
+            return_value=("litellm", ""),
+        ):
+            analyzer = GeminiAnalyzer(skill_instructions="", default_skill_policy="")
+
+        prompt = analyzer._get_analysis_system_prompt("zh", stock_code="600519")
+
+        self.assertIn("T+1", prompt)
+        self.assertIn("一字涨跌停", prompt)
+        self.assertIn("相对宽基指数与所属行业", prompt)
+        self.assertIn("不得凭空计算超额收益", prompt)
+        self.assertIn("公司/交易所正式公告与监管披露", prompt)
 
     def test_analysis_prompt_score_scale_splits_reduce_and_sell_bands(self) -> None:
         for legacy in (False, True):
