@@ -488,7 +488,7 @@ jobs:
             YXJ4bmdfYmxvY2sgPSBlbnZfZXhhbXBsZVtzdGFydDplbmRdCiAKICAgICBhc3NlcnQgIkdpdEh1
             YiBBY3Rpb25zIiBpbiBzZWFyeG5nX2Jsb2NrCg==
         run: |
-          git checkout HEAD^ -- .github/workflows/00-daily-analysis.yml
+          git checkout 16de035b5c00a31740aac67f14712f528761bb55 -- .github/workflows/00-daily-analysis.yml
           git rm .github/workflows/apply-source-reliability.yml
           printf '%s' "$PATCH_B64" | base64 -d | git apply
           git config user.name "github-actions[bot]"
