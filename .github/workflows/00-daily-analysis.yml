@@ -1,496 +1,578 @@
-name: Daily Stock Analysis
+name: 每日股票分析
 
 on:
+  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  schedule:
+    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+  
+  # 手动触发
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full          # 完整分析（股票+大盘）
+          - market-only   # 仅大盘复盘
+          - stocks-only   # 仅股票分析
+      force_run:
+        description: '强制运行（跳过交易日检查）'
+        required: false
+        default: false
+        type: boolean
 
-permissions:
-  contents: write
+# 并发控制：同一时间只运行一个分析任务
+concurrency:
+  group: stock-analysis
+  cancel-in-progress: false
 
 jobs:
-  apply-source-reliability:
+  analyze:
     runs-on: ubuntu-latest
+    # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
+    # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
+    environment: STOCK_LIST
+    # 添加超时限制，防止任务卡死
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: 随机延迟（避免固定时间访问）
+        run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
+      
+      - name: 检出代码
+        uses: actions/checkout@v5
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
         with:
-          ref: codex/a-share-analysis-hardening
-          fetch-depth: 0
-      - name: Apply verified patch and clean temporary files
-        env:
-          PATCH_B64: |
-            ZGlmZiAtLWdpdCBhLy5lbnYuZXhhbXBsZSBiLy5lbnYuZXhhbXBsZQppbmRleCAzZDM1ZjM1My4u
-            NmY4MzA3MDIgMTAwNjQ0Ci0tLSBhLy5lbnYuZXhhbXBsZQorKysgYi8uZW52LmV4YW1wbGUKQEAg
-            LTM4Nyw3ICszODcsNyBAQCBHRU1JTklfQVBJX0tFWT0KICMgTWluaU1heCBBUEkgS2V577yIQ29k
-            aW5nIFBsYW4gV2ViIFNlYXJjaO+8jOaUr+aMgeWkmuS4qu+8jOmAl+WPt+WIhumalO+8iQogIyDo
-            jrflj5Y6IGh0dHBzOi8vcGxhdGZvcm0ubWluaW1heC5pby8KICMgTUlOSU1BWF9BUElfS0VZUz15
-            b3VyX21pbmltYXhfa2V5X2hlcmUKLSMgVGF2aWx5IEFQSSBLZXlz77yI5pSv5oyB5aSa5Liq77yM
-            6YCX5Y+35YiG6ZqU77yJCisjIFRhdmlseSBBUEkgS2V5c++8iOaUr+aMgeWkmuS4qu+8jOmAl+WP
-            t+WIhumalO+8m+m7mOiupCBiYXNpYyDmkJzntKLvvIzmr4/mrKEgMSBjcmVkaXTvvIkKIFRBVklM
-            WV9BUElfS0VZUz0KICMgU2VycEFQSSBLZXlz77yI5pSv5oyB5aSa5Liq77yM6YCX5Y+35YiG6ZqU
-            77yJCiBTRVJQQVBJX0FQSV9LRVlTPQpAQCAtMzk2LDkgKzM5Niw5IEBAIFNFUlBBUElfQVBJX0tF
-            WVM9CiBCUkFWRV9BUElfS0VZUz0KICMgU2VhclhORyDlrp7kvovlnLDlnYDvvIjpgJflj7fliIbp
-            mpTvvIznp4HmnInpg6jnvbLml6DphY3pop3vvIzpnIDlnKggc2V0dGluZ3MueW1sIOWQr+eUqCBm
-            b3JtYXQ6IGpzb27vvIkKICMgR2l0SHViIEFjdGlvbnMg5q+P5pel5YiG5p6Q5bel5L2c5rWB5pSv
-            5oyB5ZCM5ZCNIFZhcmlhYmxlcyDkvJjlhYjjgIFTZWNyZXRzIOWbnumAgO+8m+WFrOe9keWcsOWd
-            gOWPr+mFjee9ruS4uiBWYXJpYWJsZeOAggotIyDnlZnnqbrml7bpu5jorqToh6rliqjku44gc2Vh
-            cnguc3BhY2Ug5ouJ5Y+W5YWs5YWx5a6e5L6L77yb6Iul5LiN5biM5pyb6K6/6Zeu5YWs5YWx5a6e
-            5L6L77yM5Y+v5bCG5LiL5pa55byA5YWz6K6+5Li6IGZhbHNlCisjIOWFrOWFseWunuS+i+WuueaY
-            k+mBh+WIsOmZkOa1geOAgeWPjeeIrOWSjOaXoOWTjeW6lO+8jOWboOatpOm7mOiupOWFs+mXre+8
-            m+S7heWcqOaOpeWPl+ivpemjjumZqeaXtuS4u+WKqOiuvuS4uiB0cnVlCiBTRUFSWE5HX0JBU0Vf
-            VVJMUz0KLVNFQVJYTkdfUFVCTElDX0lOU1RBTkNFU19FTkFCTEVEPXRydWUKK1NFQVJYTkdfUFVC
-            TElDX0lOU1RBTkNFU19FTkFCTEVEPWZhbHNlCiAKICMgPT09PT09PT09PT09PT09PT09PT09PT09
-            PT09PT09PT09PT0KICMgU29jaWFsIFNlbnRpbWVudCBJbnRlbGxpZ2VuY2UgKFVTIHN0b2NrcyBv
-            bmx5KQpAQCAtNDI1LDcgKzQyNSw3IEBAIFNFQVJYTkdfUFVCTElDX0lOU1RBTkNFU19FTkFCTEVE
-            PXRydWUKICMgTkVXU19JTlRFTF9NQVhfSVRFTVNfUEVSX1NPVVJDRT01MAogIyDlvIDlkK/lkI7l
-            nKjkuKrogqHliIbmnpDjgIFBZ2VudCDliIbmnpDlkozlpKfnm5jlpI3nm5jor7vlj5bmnKzlnLDo
-            tYTorq/msaDliY3vvIzoh6rliqjliJ3lp4vljJblhoXnva7otYTorq/mupDlubbmi4nlj5blkK/n
-            lKjmupDvvJsKICMg6buY6K6k5YWz6Zet77yM6YG/5YWN5pyq56Gu6K6k55qE5aSW6YOo6K+35rGC
-            5ZKM5YiG5p6Q6L6T5YWl5Y+Y5YyWCi0jIOazqO+8muS7k+W6k+m7mOiupCBkYWlseV9hbmFseXNp
-            cyB3b3JrZmxvdyDmnKrmmL7lvI/pgI/kvKDor6Xlj5jph4/vvIxBY3Rpb25zIOS9v+eUqOivt+WQ
-            jOatpeihpem9kCB3b3JrZmxvdyDmmKDlsIQKKyMg5rOo77ya5LuT5bqTIGRhaWx5X2FuYWx5c2lz
-            IHdvcmtmbG93IOW3suaYvuW8j+mAj+S8oOivpeWPmOmHj++8jOWPr+WcqCBBY3Rpb25zIFZhcmlh
-            YmxlcyDkuK3phY3nva4KICMgTkVXU19JTlRFTF9BVVRPX0ZFVENIX0VOQUJMRUQ9ZmFsc2UKICMg
-            TmV3c05vdyBIVFRQIEFQSSDln7rlnLDlnYAg4oCU4oCUIOWklumDqOS+nei1lumFjee9rgogIyAt
-            IOWumOaWuemhueebruWPiumDqOe9suaMh+WNl++8mmh0dHBzOi8vZ2l0aHViLmNvbS9xcWhhbm4v
-            bmV3c25vdwpkaWZmIC0tZ2l0IGEvLmdpdGh1Yi93b3JrZmxvd3MvMDAtZGFpbHktYW5hbHlzaXMu
-            eW1sIGIvLmdpdGh1Yi93b3JrZmxvd3MvMDAtZGFpbHktYW5hbHlzaXMueW1sCmluZGV4IDI1OTU5
-            MDA4Li4zNTUyY2E1ZiAxMDA2NDQKLS0tIGEvLmdpdGh1Yi93b3JrZmxvd3MvMDAtZGFpbHktYW5h
-            bHlzaXMueW1sCisrKyBiLy5naXRodWIvd29ya2Zsb3dzLzAwLWRhaWx5LWFuYWx5c2lzLnltbApA
-            QCAtNTAzLDcgKzUwMyw3IEBAIGpvYnM6CiAgICAgICAgICAgICAgIGVjaG8gIiAgU2VhclhORyBQ
-            dWJsaWMgSW5zdGFuY2VzOiDinYwg5bey56aB55SoIgogICAgICAgICAgICAgICA7OwogICAgICAg
-            ICAgICAgIiIpCi0gICAgICAgICAgICAgIGVjaG8gIiAgU2VhclhORyBQdWJsaWMgSW5zdGFuY2Vz
-            OiDinIUg6buY6K6k5byA5ZCvIgorICAgICAgICAgICAgICBlY2hvICIgIFNlYXJYTkcgUHVibGlj
-            IEluc3RhbmNlczog4p2MIOm7mOiupOWFs+mXrSIKICAgICAgICAgICAgICAgOzsKICAgICAgICAg
-            ICAgICopCiAgICAgICAgICAgICAgIGVjaG8gIiAgU2VhclhORyBQdWJsaWMgSW5zdGFuY2VzOiDi
-            nIUg5bey5ZCv55SoIgpkaWZmIC0tZ2l0IGEvZG9jcy9DSEFOR0VMT0cubWQgYi9kb2NzL0NIQU5H
-            RUxPRy5tZAppbmRleCBkNDUwM2E4MS4uYjE5NmZjZmEgMTAwNjQ0Ci0tLSBhL2RvY3MvQ0hBTkdF
-            TE9HLm1kCisrKyBiL2RvY3MvQ0hBTkdFTE9HLm1kCkBAIC0xMSw2ICsxMSw3IEBAIGFuZCB0aGlz
-            IHByb2plY3QgYWRoZXJlcyB0byBbU2VtYW50aWMgVmVyc2lvbmluZ10oaHR0cHM6Ly9zZW12ZXIu
-            b3JnLykuCiAKIDwhLS0g5paw5p2h55uu5qC85byP77yaLSBb57G75Z6LXSDmj4/ov7DvvIjnsbvl
-            novlj5blgLzvvJrmlrDlip/og70v5pS56L+bL+S/ruWkjS/mlofmoaMv5rWL6K+VL2Nob3Jl77yJ
-            LS0+CiA8IS0tIOavj+adoeeLrOeri+S4gOihjOi/veWKoOWIsOacrOauteacq+Wwvu+8jOaXoOmc
-            gOWIhuexu+agh+mimO+8jOWQiOW5tuaXtuWGsueqgeacgOWwjyAtLT4KKy0gW+aUuei/m10g5YWs
-            5YWxIFNlYXJYTkcg5pS55Li66buY6K6k5YWz6Zet77yMVGF2aWx5IOm7mOiupOS9v+eUqOavj+as
-            oSAxIGNyZWRpdCDnmoQgYmFzaWMg5pCc57Si77ybQSDogqHlhazlkYrmo4DntKLkvJjlhYjpmZDl
-            rprlt6jmva7jgIHmsqrmt7HljJfkuqTmmJPmiYDlrpjmlrnln5/lkI3vvIzlubbmmI7noa7ljLrl
-            iIbigJzml6Dnu5PmnpzigJ3kuI7igJzmkJzntKLmupDkuI3lj6/nlKjigJ3jgIIKIC0gW+aUuei/
-            m10gQUlIdWJNaXgg5rOo5YaM5LiO5byV5rWB6ZO+5o6l57uf5LiA5L2/55SoIGluZmVyZXJhLmNv
-            be+8jOaUueWWhOS4reWbveWkp+mZhue9kee7nOebtOi/nuS9k+mqjOOAggogCiAjIyBbMy4zMC4w
-            XSAtIDIwMjYtMDgtMDkKZGlmZiAtLWdpdCBhL2RvY3MvREVQTE9ZLm1kIGIvZG9jcy9ERVBMT1ku
-            bWQKaW5kZXggYjRkNTA4YzcuLjcwMzk3MWNlIDEwMDY0NAotLS0gYS9kb2NzL0RFUExPWS5tZAor
-            KysgYi9kb2NzL0RFUExPWS5tZApAQCAtNDM0LDggKzQzNCw4IEBAIGdpdCBwdXNoIC11IG9yaWdp
-            biBtYWluCiB8IGBCT0NIQV9BUElfS0VZU2AgfCDljZrmn6XmkJzntKIgQVBJIEtleSB8IOWPr+mA
-            iSB8CiB8IGBCUkFWRV9BUElfS0VZU2AgfCBCcmF2ZSBTZWFyY2ggQVBJIEtleSB8IOWPr+mAiSB8
-            CiB8IGBNSU5JTUFYX0FQSV9LRVlTYCB8IE1pbmlNYXggQ29kaW5nIFBsYW4gV2ViIFNlYXJjaCB8
-            IOWPr+mAiSB8Ci18IGBTRUFSWE5HX0JBU0VfVVJMU2AgfCBTZWFyWE5HIOiHquW7uuWunuS+i++8
-            iOaXoOmFjemineWFnOW6le+8jOmcgOWcqCBzZXR0aW5ncy55bWwg5ZCv55SoIGZvcm1hdDoganNv
-            bu+8ie+8m+eVmeepuuaXtum7mOiupOiHquWKqOWPkeeOsOWFrOWFseWunuS+iyB8IOWPr+mAiSB8
-            Ci18IGBTRUFSWE5HX1BVQkxJQ19JTlNUQU5DRVNfRU5BQkxFRGAgfCDmmK/lkKblnKggYFNFQVJY
-            TkdfQkFTRV9VUkxTYCDkuLrnqbrml7boh6rliqjku44gYHNlYXJ4LnNwYWNlYCDojrflj5blhazl
-            hbHlrp7kvovvvIjpu5jorqQgYHRydWVg77yJIHwg5Y+v6YCJIHwKK3wgYFNFQVJYTkdfQkFTRV9V
-            UkxTYCB8IFNlYXJYTkcg6Ieq5bu65a6e5L6L77yI5peg6YWN6aKd5YWc5bqV77yM6ZyA5ZyoIHNl
-            dHRpbmdzLnltbCDlkK/nlKggZm9ybWF0OiBqc29u77yJIHwg5Y+v6YCJIHwKK3wgYFNFQVJYTkdf
-            UFVCTElDX0lOU1RBTkNFU19FTkFCTEVEYCB8IOaYr+WQpuWcqOacqumFjee9ruiHquW7uuWunuS+
-            i+aXtuWPkeeOsOWFrOWFseWunuS+i++8m+WFrOWFseiKgueCueWuueaYk+mZkOa1geaIluinpuWP
-            keWPjeeIrO+8jOm7mOiupCBgZmFsc2VgIHwg5Y+v6YCJIHwKIHwgYFRVU0hBUkVfVE9LRU5gIHwg
-            VHVzaGFyZSBUb2tlbiB8IOWPr+mAiSB8CiB8IGBHRU1JTklfTU9ERUxgIHwg5qih5Z6L5ZCN56ew
-            77yI6buY6K6kIGdlbWluaS0yLjAtZmxhc2jvvIkgfCDlj6/pgIkgfAogCmRpZmYgLS1naXQgYS9k
-            b2NzL2RvY2tlci96ZWFidXItZGVwbG95bWVudC5tZCBiL2RvY3MvZG9ja2VyL3plYWJ1ci1kZXBs
-            b3ltZW50Lm1kCmluZGV4IDYyZGNjN2M5Li42OTYyY2JkMyAxMDA2NDQKLS0tIGEvZG9jcy9kb2Nr
-            ZXIvemVhYnVyLWRlcGxveW1lbnQubWQKKysrIGIvZG9jcy9kb2NrZXIvemVhYnVyLWRlcGxveW1l
-            bnQubWQKQEAgLTE2Myw4ICsxNjMsOCBAQCBaZWFidXIg5pyN5Yqh5bu66K6u5LuOIGAxR2Ag5YaF
-            5a2Y6LW35q2l77ybYDUxMk1gIOS7hemAguWQiOi9u+mHjyBXZWIvQVBJ44CB5Y2VCiB8IGBCT0NI
-            QV9BUElfS0VZU2AgfCBCb2NoYSBBUEkg5a+G6ZKl77yI55So6YCX5Y+35YiG6ZqU77yJIHwKIHwg
-            YEJSQVZFX0FQSV9LRVlTYCB8IEJyYXZlIFNlYXJjaCBBUEkg5a+G6ZKl77yI55So6YCX5Y+35YiG
-            6ZqU77yJIHwKIHwgYE1JTklNQVhfQVBJX0tFWVNgIHwgTWluaU1heCBBUEkg5a+G6ZKl77yI55So
-            6YCX5Y+35YiG6ZqU77yJIHwKLXwgYFNFQVJYTkdfQkFTRV9VUkxTYCB8IFNlYXJYTkcg5a6e5L6L
-            5Zyw5Z2A77yI6YCX5Y+35YiG6ZqU77yM5peg6YWN6aKd5YWc5bqV77yM6ZyA5ZyoIHNldHRpbmdz
-            LnltbCDlkK/nlKggZm9ybWF0OiBqc29u77yJ77yb55WZ56m65pe26buY6K6k6Ieq5Yqo5Y+R546w
-            5YWs5YWx5a6e5L6LIHwKLXwgYFNFQVJYTkdfUFVCTElDX0lOU1RBTkNFU19FTkFCTEVEYCB8IOaY
-            r+WQpuWcqCBgU0VBUlhOR19CQVNFX1VSTFNgIOS4uuepuuaXtuiHquWKqOS7jiBgc2Vhcnguc3Bh
-            Y2VgIOiOt+WPluWFrOWFseWunuS+i++8iOm7mOiupCBgdHJ1ZWDvvIkgfAorfCBgU0VBUlhOR19C
-            QVNFX1VSTFNgIHwgU2VhclhORyDoh6rlu7rlrp7kvovlnLDlnYDvvIjpgJflj7fliIbpmpTvvIzm
-            l6DphY3pop3lhZzlupXvvIzpnIDlnKggc2V0dGluZ3MueW1sIOWQr+eUqCBmb3JtYXQ6IGpzb27v
-            vIkgfAorfCBgU0VBUlhOR19QVUJMSUNfSU5TVEFOQ0VTX0VOQUJMRURgIHwg5piv5ZCm5Zyo5pyq
-            6YWN572u6Ieq5bu65a6e5L6L5pe25Y+R546w5YWs5YWx5a6e5L6L77yb5YWs5YWx6IqC54K55a65
-            5piT6ZmQ5rWB5oiW6Kem5Y+R5Y+N54is77yM6buY6K6kIGBmYWxzZWAgfAogCiAjIyMgNS40IOmF
-            jee9ruaWueazlQogCmRpZmYgLS1naXQgYS9kb2NzL2Z1bGwtZ3VpZGUubWQgYi9kb2NzL2Z1bGwt
-            Z3VpZGUubWQKaW5kZXggN2JkMTFiODcuLjMzMTlkZmQzIDEwMDY0NAotLS0gYS9kb2NzL2Z1bGwt
-            Z3VpZGUubWQKKysrIGIvZG9jcy9mdWxsLWd1aWRlLm1kCkBAIC0xNTksMTIgKzE1OSwxMiBAQCBk
-            YWlseV9zdG9ja19hbmFseXNpcy8KIHwgYFNUT0NLX0xJU1RgIHwg6Ieq6YCJ6IKh5Luj56CB77yM
-            5aaCIGA2MDA1MTksMzAwNzUwLDAwMjU5NCw3MjAzLlQsMDA1OTMwLktTYO+8m+aOqOiNkOS9v+eU
-            qOiLseaWh+mAl+WPt++8jOS4reaWh+mAl+WPt+OAgemhv+WPt+OAgeWIhuWPt+OAgeepuuagvOWS
-            jOaNouihjOS8muiiq+ivhuWIq+W5tuinhOiMg+S4uuiLseaWh+mAl+WPtyB8IOKchSB8CiB8IGBB
-            TlNQSVJFX0FQSV9LRVlTYCB8IFtBbnNwaXJlIEFJIFNlYXJjaF0oaHR0cHM6Ly9haXNlYXJjaC5h
-            bnNwaXJlLmNuLykg6ZKI5a+55Lit5paH5YaF5a6554m55Yir5LyY5YyW77yb5ZCM5LiAIEtleSDl
-            j6/nlKjkuo7mkJzntKLkuI4gQW5zcGlyZSDlpKfmqKHlnovnvZHlhbPnmoTlhZzlupXnpLrkvovv
-            vIjmmK/lkKblj6/nlKjku6XmjqfliLblj7DkuI7otKblj7fmnYPpmZDkuLrlh4bvvIkgfCDmjqjo
-            jZAgfAogfCBgU0VSUEFQSV9BUElfS0VZU2AgfCBbU2VycEFQSV0oaHR0cHM6Ly9zZXJwYXBpLmNv
-            bS9iYWlkdS1zZWFyY2gtYXBpP3V0bV9zb3VyY2U9Z2l0aHViX2RhaWx5X3N0b2NrX2FuYWx5c2lz
-            KSDmkJzntKLlvJXmk47nu5PmnpzooaXlvLrvvIzpgILlkIjlrp7ml7bph5Hono3mlrDpl7sgfCDm
-            jqjojZAgfAotfCBgVEFWSUxZX0FQSV9LRVlTYCB8IFtUYXZpbHldKGh0dHBzOi8vdGF2aWx5LmNv
-            bS8pIOaQnOe0oiBBUEnvvIjmlrDpl7vmkJzntKLvvIkgfCDlj6/pgIkgfAorfCBgVEFWSUxZX0FQ
-            SV9LRVlTYCB8IFtUYXZpbHldKGh0dHBzOi8vdGF2aWx5LmNvbS8pIOaQnOe0oiBBUEnvvJvpu5jo
-            rqTkvb/nlKggYmFzaWMg5rex5bqm77yM5q+P5qyh5pCc57SiIDEgY3JlZGl077yMQSDogqHlhazl
-            kYrnu7TluqbpmZDlrprlt6jmva7lj4rmsqrmt7HljJfkuqTmmJPmiYDlrpjmlrnln5/lkI0gfCDl
-            j6/pgIkgfAogfCBgQk9DSEFfQVBJX0tFWVNgIHwgW+WNmuafpeaQnOe0ol0oaHR0cHM6Ly9vcGVu
-            LmJvY2hhLmNuLykgV2ViIFNlYXJjaCBBUEnvvIjkuK3mlofmkJzntKLkvJjljJbvvIzmlK/mjIFB
-            SeaRmOimge+8jOWkmuS4qmtleeeUqOmAl+WPt+WIhumalO+8iSB8IOWPr+mAiSB8CiB8IGBCUkFW
-            RV9BUElfS0VZU2AgfCBbQnJhdmUgU2VhcmNoXShodHRwczovL2JyYXZlLmNvbS9zZWFyY2gvYXBp
-            LykgQVBJ77yI6ZqQ56eB5LyY5YWI77yM576O6IKh5LyY5YyW77yM5aSa5Liqa2V555So6YCX5Y+3
-            5YiG6ZqU77yJIHwg5Y+v6YCJIHwKIHwgYE1JTklNQVhfQVBJX0tFWVNgIHwgW01pbmlNYXhdKGh0
-            dHBzOi8vcGxhdGZvcm0ubWluaW1heC5pby8pIENvZGluZyBQbGFuIFdlYiBTZWFyY2jvvIjnu5Pm
-            noTljJbmkJzntKLnu5PmnpzvvIkgfCDlj6/pgIkgfAotfCBgU0VBUlhOR19CQVNFX1VSTFNgIHwg
-            U2VhclhORyDoh6rlu7rlrp7kvovvvIjml6DphY3pop3lhZzlupXvvIzpnIDlnKggc2V0dGluZ3Mu
-            eW1sIOWQr+eUqCBmb3JtYXQ6IGpzb27vvInvvJvnlZnnqbrml7bpu5jorqToh6rliqjlj5HnjrDl
-            hazlhbHlrp7kvosgfCDlj6/pgIkgfAotfCBgU0VBUlhOR19QVUJMSUNfSU5TVEFOQ0VTX0VOQUJM
-            RURgIHwg5piv5ZCm5ZyoIGBTRUFSWE5HX0JBU0VfVVJMU2Ag5Li656m65pe26Ieq5Yqo5LuOIGBz
-            ZWFyeC5zcGFjZWAg6I635Y+W5YWs5YWx5a6e5L6L77yI6buY6K6kIGB0cnVlYO+8iSB8IOWPr+mA
-            iSB8Cit8IGBTRUFSWE5HX0JBU0VfVVJMU2AgfCBTZWFyWE5HIOiHquW7uuWunuS+i++8iOaXoOmF
-            jemineWFnOW6le+8jOmcgOWcqCBzZXR0aW5ncy55bWwg5ZCv55SoIGZvcm1hdDoganNvbu+8iSB8
-            IOWPr+mAiSB8Cit8IGBTRUFSWE5HX1BVQkxJQ19JTlNUQU5DRVNfRU5BQkxFRGAgfCDmmK/lkKbl
-            nKggYFNFQVJYTkdfQkFTRV9VUkxTYCDkuLrnqbrml7bku44gYHNlYXJ4LnNwYWNlYCDojrflj5bl
-            hazlhbHlrp7kvovvvJvlhazlhbHoioLngrnlrrnmmJPpmZDmtYHmiJbop6blj5Hlj43niKzvvIzp
-            u5jorqQgYGZhbHNlYO+8jOS7heW7uuiuruS4u+WKqOaOpeWPl+mjjumZqeaXtuW8gOWQryB8IOWP
-            r+mAiSB8CiB8IGBUVVNIQVJFX1RPS0VOYCB8IFtUdXNoYXJlIFByb10oaHR0cHM6Ly90dXNoYXJl
-            LnByby93ZWJvcmRlci8jL2xvZ2luP3JlZz04MzQ2MzggKSBUb2tlbiB8IOWPr+mAiSB8CiB8IGBU
-            VVNIQVJFX0hUVFBfVVJMYCB8IFR1c2hhcmUgUHJvIEhUVFAg5o6l5YWl5Zyw5Z2A77yb55WZ56m6
-            77yI5oiW5pyq6K6+572uL+epuueZve+8ieaXtuS9v+eUqOWumOaWueerr+eCuSBgaHR0cDovL2Fw
-            aS50dXNoYXJlLnByb2DvvIzku4XlnKjpnIDpgJrov4flhazlj7jlhoXnvZHku6PnkIbjgIHot6jl
-            ooPnvZHnu5zmiJboh6rlu7rplZzlg4/ml7bloavlhpkgYGh0dHA6Ly9gIOaIliBgaHR0cHM6Ly9g
-            IOW8gOWktOeahOWujOaVtOWcsOWdgCB8IOWPr+mAiSB8CiB8IGBUSUNLRkxPV19BUElfS0VZYCB8
-            IFtUaWNrRmxvd10oaHR0cHM6Ly90aWNrZmxvdy5vcmcpIEFQSSBLZXnvvJvlj6/pgInvvIznlKjk
-            uo4gQSDogqHml6UgS+OAgeWunuaXtuihjOaDheOAgeiCoeelqOWIl+ihqC/lkI3np7DkuI7lpKfn
-            m5jlpI3nm5jlop7lvLrvvJvlpLHotKXmiJbmnYPpmZDkuI3otrPml7boh6rliqjlm57pgIDjgIIg
-            fCDlj6/pgIkgfApAQCAtMzY5LDggKzM2OSw4IEBAIGRhaWx5X3N0b2NrX2FuYWx5c2lzLwogfCBg
-            TUlOSU1BWF9BUElfS0VZU2AgfCBNaW5pTWF4IENvZGluZyBQbGFuIFdlYiBTZWFyY2jvvIjnu5Pm
-            noTljJbmkJzntKLnu5PmnpzvvIkgfCDlj6/pgIkgfAogfCBgU09DSUFMX1NFTlRJTUVOVF9BUElf
-            S0VZYCB8IFN0b2NrIFNlbnRpbWVudCBBUEkgS2V577yIUmVkZGl0IC8gWCAvIFBvbHltYXJrZXTv
-            vIzlj6/pgInvvIkgfCDlj6/pgIkgfAogfCBgU09DSUFMX1NFTlRJTUVOVF9BUElfVVJMYCB8IFN0
-            b2NrIFNlbnRpbWVudCBBUEkg5Zyw5Z2A77yI6buY6K6kIGBodHRwczovL2FwaS5hZGFub3Mub3Jn
-            YO+8iSB8IOWPr+mAiSB8Ci18IGBTRUFSWE5HX0JBU0VfVVJMU2AgfCBTZWFyWE5HIOiHquW7uuWu
-            nuS+i++8iOaXoOmFjemineWFnOW6le+8jOmcgOWcqCBzZXR0aW5ncy55bWwg5ZCv55SoIGZvcm1h
-            dDoganNvbu+8ie+8m+eVmeepuuaXtum7mOiupOiHquWKqOWPkeeOsOWFrOWFseWunuS+iyB8IOWP
-            r+mAiSB8Ci18IGBTRUFSWE5HX1BVQkxJQ19JTlNUQU5DRVNfRU5BQkxFRGAgfCDmmK/lkKblnKgg
-            YFNFQVJYTkdfQkFTRV9VUkxTYCDkuLrnqbrml7boh6rliqjku44gYHNlYXJ4LnNwYWNlYCDojrfl
-            j5blhazlhbHlrp7kvovvvIjpu5jorqQgYHRydWVg77yJIHwg5Y+v6YCJIHwKK3wgYFNFQVJYTkdf
-            QkFTRV9VUkxTYCB8IFNlYXJYTkcg6Ieq5bu65a6e5L6L77yI5peg6YWN6aKd5YWc5bqV77yM6ZyA
-            5ZyoIHNldHRpbmdzLnltbCDlkK/nlKggZm9ybWF0OiBqc29u77yJIHwg5Y+v6YCJIHwKK3wgYFNF
-            QVJYTkdfUFVCTElDX0lOU1RBTkNFU19FTkFCTEVEYCB8IOaYr+WQpuWcqCBgU0VBUlhOR19CQVNF
-            X1VSTFNgIOS4uuepuuaXtuS7jiBgc2Vhcnguc3BhY2VgIOiOt+WPluWFrOWFseWunuS+i++8m+WF
-            rOWFseiKgueCueWuueaYk+mZkOa1geaIluinpuWPkeWPjeeIrO+8jOm7mOiupCBgZmFsc2Vg77yM
-            5LuF5bu66K6u5Li75Yqo5o6l5Y+X6aOO6Zmp5pe25byA5ZCvIHwg5Y+v6YCJIHwKIHwgYE5FV1Nf
-            U1RSQVRFR1lfUFJPRklMRWAgfCDmlrDpl7vnrZbnlaXnqpflj6PmoaPkvY3vvJpgdWx0cmFfc2hv
-            cnRgKDHlpKkpL2BzaG9ydGAoM+WkqSkvYG1lZGl1bWAoN+WkqSkvYGxvbmdgKDMw5aSpKe+8m+Wu
-            numZheeql+WPo+WPluS4jiBgTkVXU19NQVhfQUdFX0RBWVNgIOeahOacgOWwj+WAvCB8IOm7mOiu
-            pCBgc2hvcnRgIHwKIHwgYE5FV1NfTUFYX0FHRV9EQVlTYCB8IOaWsOmXu+acgOWkp+aXtuaViO+8
-            iOWkqe+8ie+8jOaQnOe0ouaXtumZkOWItue7k+aenOWcqOi/keacn+WGhSB8IOm7mOiupCBgM2Ag
-            fAogfCBgQklBU19USFJFU0hPTERgIHwg5LmW56a7546H6ZiI5YC877yIJe+8ie+8jOi2hei/h+aP
-            kOekuuS4jei/vemrmO+8m+W8uuWKv+i2i+WKv+iCoeiHquWKqOaUvuWuveWIsCAxLjUg5YCNIHwg
-            6buY6K6kIGA1LjBgIHwKZGlmZiAtLWdpdCBhL2RvY3MvZnVsbC1ndWlkZV9FTi5tZCBiL2RvY3Mv
-            ZnVsbC1ndWlkZV9FTi5tZAppbmRleCAxNTk5NTdkOS4uNzAyZWEzNzIgMTAwNjQ0Ci0tLSBhL2Rv
-            Y3MvZnVsbC1ndWlkZV9FTi5tZAorKysgYi9kb2NzL2Z1bGwtZ3VpZGVfRU4ubWQKQEAgLTE1Niw4
-            ICsxNTYsOCBAQCBHbyB0byB5b3VyIGZvcmtlZCByZXBvIOKGkiBgU2V0dGluZ3NgIOKGkiBgU2Vj
-            cmV0cyBhbmQgdmFyaWFibGVzYCDihpIgYEFjdGlvbnNgCiB8IGBCT0NIQV9BUElfS0VZU2AgfCBb
-            Qm9jaGEgU2VhcmNoXShodHRwczovL29wZW4uYm9jaGEuY24vKSBXZWIgU2VhcmNoIEFQSSAoQ2hp
-            bmVzZSBzZWFyY2ggb3B0aW1pemVkLCBzdXBwb3J0cyBBSSBzdW1tYXJpZXMsIG11bHRpcGxlIGtl
-            eXMgY29tbWEtc2VwYXJhdGVkKSB8IE9wdGlvbmFsIHwKIHwgYEJSQVZFX0FQSV9LRVlTYCB8IFtC
-            cmF2ZSBTZWFyY2hdKGh0dHBzOi8vYnJhdmUuY29tL3NlYXJjaC9hcGkvKSBBUEkgKHByaXZhY3kt
-            Zmlyc3QsIFVTLXN0b2NrIG5ld3MgZW5yaWNobWVudCwgY29tbWEtc2VwYXJhdGVkIGZvciBtdWx0
-            aXBsZSBrZXlzKSB8IE9wdGlvbmFsIHwKIHwgYE1JTklNQVhfQVBJX0tFWVNgIHwgW01pbmlNYXhd
-            KGh0dHBzOi8vcGxhdGZvcm0ubWluaW1heC5pby8pIENvZGluZyBQbGFuIFdlYiBTZWFyY2ggKHN0
-            cnVjdHVyZWQgc2VhcmNoIHJlc3VsdHMpIHwgT3B0aW9uYWwgfAotfCBgU0VBUlhOR19CQVNFX1VS
-            TFNgIHwgU2VhclhORyBzZWxmLWhvc3RlZCBpbnN0YW5jZXMgKHF1b3RhLWZyZWUgZmFsbGJhY2ss
-            IGVuYWJsZSBmb3JtYXQ6IGpzb24gaW4gc2V0dGluZ3MueW1sKTsgd2hlbiBlbXB0eSB0aGUgYXBw
-            IGF1dG8tZGlzY292ZXJzIHB1YmxpYyBpbnN0YW5jZXMgfCBPcHRpb25hbCB8Ci18IGBTRUFSWE5H
-            X1BVQkxJQ19JTlNUQU5DRVNfRU5BQkxFRGAgfCBBdXRvLWRpc2NvdmVyIHB1YmxpYyBTZWFyWE5H
-            IGluc3RhbmNlcyBmcm9tIGBzZWFyeC5zcGFjZWAgd2hlbiBgU0VBUlhOR19CQVNFX1VSTFNgIGlz
-            IGVtcHR5IChkZWZhdWx0IGB0cnVlYCkgfCBPcHRpb25hbCB8Cit8IGBTRUFSWE5HX0JBU0VfVVJM
-            U2AgfCBTZWxmLWhvc3RlZCBTZWFyWE5HIGluc3RhbmNlcyAocXVvdGEtZnJlZSBmYWxsYmFjazsg
-            ZW5hYmxlIGBmb3JtYXQ6IGpzb25gIGluIGBzZXR0aW5ncy55bWxgKSB8IE9wdGlvbmFsIHwKK3wg
-            YFNFQVJYTkdfUFVCTElDX0lOU1RBTkNFU19FTkFCTEVEYCB8IERpc2NvdmVyIHB1YmxpYyBTZWFy
-            WE5HIGluc3RhbmNlcyBmcm9tIGBzZWFyeC5zcGFjZWAgd2hlbiBubyBzZWxmLWhvc3RlZCBVUkwg
-            aXMgY29uZmlndXJlZC4gUHVibGljIG5vZGVzIGFyZSBmcmVxdWVudGx5IHJhdGUtbGltaXRlZCBv
-            ciBibG9ja2VkLCBzbyB0aGlzIGlzIG9wdC1pbiBhbmQgZGVmYXVsdHMgdG8gYGZhbHNlYCB8IE9w
-            dGlvbmFsIHwKIHwgYFRVU0hBUkVfVE9LRU5gIHwgW1R1c2hhcmUgUHJvXShodHRwczovL3R1c2hh
-            cmUucHJvL3dlYm9yZGVyLyMvbG9naW4/cmVnPTgzNDYzOCkgVG9rZW4gfCBPcHRpb25hbCB8CiB8
-            IGBUVVNIQVJFX0hUVFBfVVJMYCB8IFR1c2hhcmUgUHJvIEhUVFAgZW5kcG9pbnQ7IHdoZW4gdW5z
-            ZXQvZW1wdHkgZGVmYXVsdHMgdG8gdGhlIG9mZmljaWFsIGBodHRwOi8vYXBpLnR1c2hhcmUucHJv
-            YC4gU2V0IHRvIGEgYGh0dHA6Ly9gIG9yIGBodHRwczovL2AgVVJMIG9ubHkgd2hlbiByb3V0aW5n
-            IHRocm91Z2ggYSBjb3Jwb3JhdGUgcHJveHksIGNyb3NzLWJvcmRlciBuZXR3b3JrLCBvciBhIHNl
-            bGYtaG9zdGVkIG1pcnJvciB8IE9wdGlvbmFsIHwKIHwgYFRJQ0tGTE9XX0FQSV9LRVlgIHwgW1Rp
-            Y2tGbG93XShodHRwczovL3RpY2tmbG93Lm9yZykgQVBJIGtleSBmb3Igb3B0aW9uYWwgQS1zaGFy
-            ZSBkYWlseSBLLWxpbmVzLCByZWFsdGltZSBxdW90ZXMsIHN0b2NrIGxpc3QvbmFtZSBsb29rdXAs
-            IGFuZCBDTiBtYXJrZXQgcmV2aWV3IGVuaGFuY2VtZW50OyBwZXJtaXNzaW9uIG9yIGVudGl0bGVt
-            ZW50IGZhaWx1cmVzIGZhbGwgYmFjayB0byBleGlzdGluZyBwcm92aWRlcnMgfCBPcHRpb25hbCB8
-            CkBAIC0zMzIsOCArMzMyLDggQEAgRm9yIHRoZSBub3RpZmljYXRpb24gYmFzZWxpbmUsIGRpYWdu
-            b3N0aWNzLCBhbmQgZGVwbG95bWVudCBub3Rlcywgc2VlIFtOb3RpZmljYXQKIHwgYE1JTklNQVhf
-            QVBJX0tFWVNgIHwgTWluaU1heCBDb2RpbmcgUGxhbiBXZWIgU2VhcmNoIChzdHJ1Y3R1cmVkIHJl
-            c3VsdHMpIHwgT3B0aW9uYWwgfAogfCBgU09DSUFMX1NFTlRJTUVOVF9BUElfS0VZYCB8IFN0b2Nr
-            IFNlbnRpbWVudCBBUEkgS2V5IChSZWRkaXQgLyBYIC8gUG9seW1hcmtldCwgVVMgc3RvY2tzIG9w
-            dGlvbmFsKSB8IE9wdGlvbmFsIHwKIHwgYFNPQ0lBTF9TRU5USU1FTlRfQVBJX1VSTGAgfCBTdG9j
-            ayBTZW50aW1lbnQgQVBJIGVuZHBvaW50IChkZWZhdWx0IGBodHRwczovL2FwaS5hZGFub3Mub3Jn
-            YCkgfCBPcHRpb25hbCB8Ci18IGBTRUFSWE5HX0JBU0VfVVJMU2AgfCBTZWFyWE5HIHNlbGYtaG9z
-            dGVkIGluc3RhbmNlcyAocXVvdGEtZnJlZSBmYWxsYmFjaywgZW5hYmxlIGZvcm1hdDoganNvbiBp
-            biBzZXR0aW5ncy55bWwpOyB3aGVuIGVtcHR5IHRoZSBhcHAgYXV0by1kaXNjb3ZlcnMgcHVibGlj
-            IGluc3RhbmNlcyB8IE9wdGlvbmFsIHwKLXwgYFNFQVJYTkdfUFVCTElDX0lOU1RBTkNFU19FTkFC
-            TEVEYCB8IEF1dG8tZGlzY292ZXIgcHVibGljIFNlYXJYTkcgaW5zdGFuY2VzIGZyb20gYHNlYXJ4
-            LnNwYWNlYCB3aGVuIGBTRUFSWE5HX0JBU0VfVVJMU2AgaXMgZW1wdHkgKGRlZmF1bHQgYHRydWVg
-            KSB8IE9wdGlvbmFsIHwKK3wgYFNFQVJYTkdfQkFTRV9VUkxTYCB8IFNlbGYtaG9zdGVkIFNlYXJY
-            TkcgaW5zdGFuY2VzIChxdW90YS1mcmVlIGZhbGxiYWNrOyBlbmFibGUgYGZvcm1hdDoganNvbmAg
-            aW4gYHNldHRpbmdzLnltbGApIHwgT3B0aW9uYWwgfAorfCBgU0VBUlhOR19QVUJMSUNfSU5TVEFO
-            Q0VTX0VOQUJMRURgIHwgRGlzY292ZXIgcHVibGljIFNlYXJYTkcgaW5zdGFuY2VzIGZyb20gYHNl
-            YXJ4LnNwYWNlYCB3aGVuIG5vIHNlbGYtaG9zdGVkIFVSTCBpcyBjb25maWd1cmVkLiBQdWJsaWMg
-            bm9kZXMgYXJlIGZyZXF1ZW50bHkgcmF0ZS1saW1pdGVkIG9yIGJsb2NrZWQsIHNvIHRoaXMgaXMg
-            b3B0LWluIGFuZCBkZWZhdWx0cyB0byBgZmFsc2VgIHwgT3B0aW9uYWwgfAogCiA+IEJlaGF2aW9y
-            IG5vdGU6IFNlYXJjaCBhbmQgc29jaWFsIHNlbnRpbWVudCBhcmUgb3B0aW9uYWwgZW5oYW5jZW1l
-            bnQgc2VydmljZXMuIElmIGVpdGhlciBzZXJ2aWNlIGZhaWxzIHRvIGluaXRpYWxpemUsIHRoZSBz
-            eXN0ZW0gbG9ncyBhIHdhcm5pbmcgYW5kIGRlZ3JhZGVzIGdyYWNlZnVsbHkgYnkgc2tpcHBpbmcg
-            dGhhdCBzdGFnZSB3aXRob3V0IGJsb2NraW5nIHRoZSBjb3JlIGFuYWx5c2lzIGZsb3cuCiAKZGlm
-            ZiAtLWdpdCBhL3NyYy9jb25maWcucHkgYi9zcmMvY29uZmlnLnB5CmluZGV4IDI1MjFmMzA5Li5h
-            NWRlZGJhYyAxMDA2NDQKLS0tIGEvc3JjL2NvbmZpZy5weQorKysgYi9zcmMvY29uZmlnLnB5CkBA
-            IC05NzksNyArOTc5LDcgQEAgY2xhc3MgQ29uZmlnOgogICAgIGJyYXZlX2FwaV9rZXlzOiBMaXN0
-            W3N0cl0gPSBmaWVsZChkZWZhdWx0X2ZhY3Rvcnk9bGlzdCkgICMgQnJhdmUgU2VhcmNoIEFQSSBL
-            ZXlzCiAgICAgc2VycGFwaV9rZXlzOiBMaXN0W3N0cl0gPSBmaWVsZChkZWZhdWx0X2ZhY3Rvcnk9
-            bGlzdCkgICMgU2VycEFQSSBLZXlzCiAgICAgc2VhcnhuZ19iYXNlX3VybHM6IExpc3Rbc3RyXSA9
-            IGZpZWxkKGRlZmF1bHRfZmFjdG9yeT1saXN0KSAgIyBTZWFyWE5HIGluc3RhbmNlIFVSTHMgKHNl
-            bGYtaG9zdGVkLCBubyBxdW90YSkKLSAgICBzZWFyeG5nX3B1YmxpY19pbnN0YW5jZXNfZW5hYmxl
-            ZDogYm9vbCA9IFRydWUgICMgQXV0by1kaXNjb3ZlciBwdWJsaWMgU2VhclhORyBpbnN0YW5jZXMg
-            d2hlbiBiYXNlIFVSTHMgYXJlIGFic2VudAorICAgIHNlYXJ4bmdfcHVibGljX2luc3RhbmNlc19l
-            bmFibGVkOiBib29sID0gRmFsc2UgICMgUHVibGljIGluc3RhbmNlcyBhcmUgb3B0LWluIGJlY2F1
-            c2UgdGhleSBhcmUgcmF0ZS1saW1pdGVkL3VucmVsaWFibGUKIAogICAgICMgPT09IFNvY2lhbCBT
-            ZW50aW1lbnQgKFVTIHN0b2NrcyBvbmx5LCBhcGkuYWRhbm9zLm9yZykgPT09CiAgICAgc29jaWFs
-            X3NlbnRpbWVudF9hcGlfa2V5OiBPcHRpb25hbFtzdHJdID0gTm9uZQpAQCAtMTcwNyw3ICsxNzA3
-            LDcgQEAgY2xhc3MgQ29uZmlnOgogICAgICAgICAgICAgKQogICAgICAgICBzZWFyeG5nX3B1Ymxp
-            Y19pbnN0YW5jZXNfZW5hYmxlZCA9IHBhcnNlX2Vudl9ib29sKAogICAgICAgICAgICAgb3MuZ2V0
-            ZW52KCdTRUFSWE5HX1BVQkxJQ19JTlNUQU5DRVNfRU5BQkxFRCcpLAotICAgICAgICAgICAgZGVm
-            YXVsdD1UcnVlLAorICAgICAgICAgICAgZGVmYXVsdD1GYWxzZSwKICAgICAgICAgKQogCiAgICAg
-            ICAgICMg5LyB5b6u5raI5oGv57G75Z6L5LiO5pyA5aSn5a2X6IqC5pWw6YC76L6RCmRpZmYgLS1n
-            aXQgYS9zcmMvY29yZS9tYXJrZXRfcmV2aWV3X3J1bnRpbWUucHkgYi9zcmMvY29yZS9tYXJrZXRf
-            cmV2aWV3X3J1bnRpbWUucHkKaW5kZXggZDBmYjkzZmUuLjUzMzc4YmMzIDEwMDY0NAotLS0gYS9z
-            cmMvY29yZS9tYXJrZXRfcmV2aWV3X3J1bnRpbWUucHkKKysrIGIvc3JjL2NvcmUvbWFya2V0X3Jl
-            dmlld19ydW50aW1lLnB5CkBAIC0xMDMsNyArMTAzLDcgQEAgZGVmIGJ1aWxkX21hcmtldF9yZXZp
-            ZXdfcnVudGltZSgKICAgICAgICAgICAgIHNlYXJ4bmdfcHVibGljX2luc3RhbmNlc19lbmFibGVk
-            PWdldGF0dHIoCiAgICAgICAgICAgICAgICAgY29uZmlnLAogICAgICAgICAgICAgICAgICJzZWFy
-            eG5nX3B1YmxpY19pbnN0YW5jZXNfZW5hYmxlZCIsCi0gICAgICAgICAgICAgICAgVHJ1ZSwKKyAg
-            ICAgICAgICAgICAgICBGYWxzZSwKICAgICAgICAgICAgICksCiAgICAgICAgICAgICBuZXdzX21h
-            eF9hZ2VfZGF5cz1nZXRhdHRyKGNvbmZpZywgIm5ld3NfbWF4X2FnZV9kYXlzIiwgMyksCiAgICAg
-            ICAgICAgICBuZXdzX3N0cmF0ZWd5X3Byb2ZpbGU9Z2V0YXR0cihjb25maWcsICJuZXdzX3N0cmF0
-            ZWd5X3Byb2ZpbGUiLCAic2hvcnQiKSwKZGlmZiAtLWdpdCBhL3NyYy9zZWFyY2hfc2VydmljZS5w
-            eSBiL3NyYy9zZWFyY2hfc2VydmljZS5weQppbmRleCA4M2I0YmQyZC4uMjJlM2MxNzkgMTAwNjQ0
-            Ci0tLSBhL3NyYy9zZWFyY2hfc2VydmljZS5weQorKysgYi9zcmMvc2VhcmNoX3NlcnZpY2UucHkK
-            QEAgLTI2NiwxMCArMjY2LDIyIEBAIGNsYXNzIFNlYXJjaFJlc3BvbnNlOgogICAgIHN1Y2Nlc3M6
-            IGJvb2wgPSBUcnVlCiAgICAgZXJyb3JfbWVzc2FnZTogT3B0aW9uYWxbc3RyXSA9IE5vbmUKICAg
-            ICBzZWFyY2hfdGltZTogZmxvYXQgPSAwLjAgICMg5pCc57Si6ICX5pe277yI56eS77yJCisKKyAg
-            ICBAcHJvcGVydHkKKyAgICBkZWYgb3V0Y29tZShzZWxmKSAtPiBzdHI6CisgICAgICAgICIiIlJl
-            dHVybiBhIHN0YWJsZSBvdXRjb21lIHdpdGhvdXQgY29uZmxhdGluZyBvdXRhZ2VzIHdpdGggZW1w
-            dHkgcmVzdWx0cy4iIiIKKyAgICAgICAgaWYgbm90IHNlbGYuc3VjY2VzczoKKyAgICAgICAgICAg
-            IHJldHVybiAidW5hdmFpbGFibGUiCisgICAgICAgIGlmIG5vdCBzZWxmLnJlc3VsdHM6CisgICAg
-            ICAgICAgICByZXR1cm4gIm5vX3Jlc3VsdHMiCisgICAgICAgIHJldHVybiAiYXZhaWxhYmxlIgog
-            ICAgIAogICAgIGRlZiB0b19jb250ZXh0KHNlbGYsIG1heF9yZXN1bHRzOiBpbnQgPSA1KSAtPiBz
-            dHI6CiAgICAgICAgICIiIuWwhuaQnOe0oue7k+aenOi9rOaNouS4uuWPr+eUqOS6jiBBSSDliIbm
-            npDnmoTkuIrkuIvmlociIiIKLSAgICAgICAgaWYgbm90IHNlbGYuc3VjY2VzcyBvciBub3Qgc2Vs
-            Zi5yZXN1bHRzOgorICAgICAgICBpZiBub3Qgc2VsZi5zdWNjZXNzOgorICAgICAgICAgICAgcmVh
-            c29uID0gZiIg5Y6f5Zug77yae3NlbGYuZXJyb3JfbWVzc2FnZX0iIGlmIHNlbGYuZXJyb3JfbWVz
-            c2FnZSBlbHNlICIiCisgICAgICAgICAgICByZXR1cm4gZiLmkJzntKLmnI3liqHlvZPliY3kuI3l
-            j6/nlKjvvIzml6Dms5XmoLjlrp4gJ3tzZWxmLnF1ZXJ5fScg55qE55u45YWz5L+h5oGv44CCe3Jl
-            YXNvbn0iCisgICAgICAgIGlmIG5vdCBzZWxmLnJlc3VsdHM6CiAgICAgICAgICAgICByZXR1cm4g
-            ZiLmkJzntKIgJ3tzZWxmLnF1ZXJ5fScg5pyq5om+5Yiw55u45YWz57uT5p6c44CCIgogICAgICAg
-            ICAKICAgICAgICAgbGluZXMgPSBbZiLjgJB7c2VsZi5xdWVyeX0g5pCc57Si57uT5p6c44CR77yI
-            5p2l5rqQ77yae3NlbGYucHJvdmlkZXJ977yJIl0KQEAgLTQzMSw2ICs0NDMsNyBAQCBjbGFzcyBU
-            YXZpbHlTZWFyY2hQcm92aWRlcihCYXNlU2VhcmNoUHJvdmlkZXIpOgogICAgICAgICBtYXhfcmVz
-            dWx0czogaW50LAogICAgICAgICBkYXlzOiBpbnQgPSA3LAogICAgICAgICB0b3BpYzogT3B0aW9u
-            YWxbc3RyXSA9IE5vbmUsCisgICAgICAgIGluY2x1ZGVfZG9tYWluczogT3B0aW9uYWxbTGlzdFtz
-            dHJdXSA9IE5vbmUsCiAgICAgKSAtPiBTZWFyY2hSZXNwb25zZToKICAgICAgICAgIiIi5omn6KGM
-            IFRhdmlseSDmkJzntKIiIiIKICAgICAgICAgdHJ5OgpAQCAtNDQ3LDEwICs0NjAsMTAgQEAgY2xh
-            c3MgVGF2aWx5U2VhcmNoUHJvdmlkZXIoQmFzZVNlYXJjaFByb3ZpZGVyKToKICAgICAgICAgdHJ5
-            OgogICAgICAgICAgICAgY2xpZW50ID0gVGF2aWx5Q2xpZW50KGFwaV9rZXk9YXBpX2tleSkKICAg
-            ICAgICAgICAgIAotICAgICAgICAgICAgIyDmiafooYzmkJzntKLvvIjkvJjljJbvvJrkvb/nlKhh
-            ZHZhbmNlZOa3seW6puOAgemZkOWItuacgOi/keWHoOWkqe+8iQorICAgICAgICAgICAgIyDln7rn
-            oYDmt7Hluqbmr4/mrKHmtojogJcgMSBjcmVkaXTvvIzkvJjlhYjorqnlhY3otLnpop3luqbopobn
-            m5bml6XluLjliIbmnpDjgIIKICAgICAgICAgICAgIHNlYXJjaF9rd2FyZ3M6IERpY3Rbc3RyLCBB
-            bnldID0gewogICAgICAgICAgICAgICAgICJxdWVyeSI6IHF1ZXJ5LAotICAgICAgICAgICAgICAg
-            ICJzZWFyY2hfZGVwdGgiOiAiYWR2YW5jZWQiLCAgIyBhZHZhbmNlZCDojrflj5bmm7TlpJrnu5Pm
-            npwKKyAgICAgICAgICAgICAgICAic2VhcmNoX2RlcHRoIjogImJhc2ljIiwKICAgICAgICAgICAg
-            ICAgICAibWF4X3Jlc3VsdHMiOiBtYXhfcmVzdWx0cywKICAgICAgICAgICAgICAgICAiaW5jbHVk
-            ZV9hbnN3ZXIiOiBGYWxzZSwKICAgICAgICAgICAgICAgICAiaW5jbHVkZV9yYXdfY29udGVudCI6
-            IEZhbHNlLApAQCAtNDU4LDYgKzQ3MSw4IEBAIGNsYXNzIFRhdmlseVNlYXJjaFByb3ZpZGVyKEJh
-            c2VTZWFyY2hQcm92aWRlcik6CiAgICAgICAgICAgICB9CiAgICAgICAgICAgICBpZiB0b3BpYyBp
-            cyBub3QgTm9uZToKICAgICAgICAgICAgICAgICBzZWFyY2hfa3dhcmdzWyJ0b3BpYyJdID0gdG9w
-            aWMKKyAgICAgICAgICAgIGlmIGluY2x1ZGVfZG9tYWluczoKKyAgICAgICAgICAgICAgICBzZWFy
-            Y2hfa3dhcmdzWyJpbmNsdWRlX2RvbWFpbnMiXSA9IGluY2x1ZGVfZG9tYWlucwogCiAgICAgICAg
-            ICAgICByZXNwb25zZSA9IGNsaWVudC5zZWFyY2goCiAgICAgICAgICAgICAgICAgKipzZWFyY2hf
-            a3dhcmdzLApAQCAtNTA1LDkgKzUyMCwxMCBAQCBjbGFzcyBUYXZpbHlTZWFyY2hQcm92aWRlcihC
-            YXNlU2VhcmNoUHJvdmlkZXIpOgogICAgICAgICBtYXhfcmVzdWx0czogaW50ID0gNSwKICAgICAg
-            ICAgZGF5czogaW50ID0gNywKICAgICAgICAgdG9waWM6IE9wdGlvbmFsW3N0cl0gPSBOb25lLAor
-            ICAgICAgICBpbmNsdWRlX2RvbWFpbnM6IE9wdGlvbmFsW0xpc3Rbc3RyXV0gPSBOb25lLAogICAg
-            ICkgLT4gU2VhcmNoUmVzcG9uc2U6Ci0gICAgICAgICIiIuaJp+ihjCBUYXZpbHkg5pCc57Si77yM
-            5Y+v5oyJ6LCD55So5pa56YCJ5oup5piv5ZCm5ZCv55So5paw6Ze7IHRvcGlj44CCIiIiCi0gICAg
-            ICAgIGlmIHRvcGljIGlzIE5vbmU6CisgICAgICAgICIiIuaJp+ihjCBUYXZpbHkg5pCc57Si77yM
-            5Y+v6YCJ5oup5paw6Ze7IHRvcGljIOWSjOWPr+S/oeWfn+WQjeeZveWQjeWNleOAgiIiIgorICAg
-            ICAgICBpZiB0b3BpYyBpcyBOb25lIGFuZCBub3QgaW5jbHVkZV9kb21haW5zOgogICAgICAgICAg
-            ICAgcmV0dXJuIHN1cGVyKCkuc2VhcmNoKHF1ZXJ5LCBtYXhfcmVzdWx0cz1tYXhfcmVzdWx0cywg
-            ZGF5cz1kYXlzKQogCiAgICAgICAgIGFwaV9rZXkgPSBzZWxmLl9nZXRfbmV4dF9rZXkoKQpAQCAt
-            NTIyLDcgKzUzOCwxNCBAQCBjbGFzcyBUYXZpbHlTZWFyY2hQcm92aWRlcihCYXNlU2VhcmNoUHJv
-            dmlkZXIpOgogCiAgICAgICAgIHN0YXJ0X3RpbWUgPSB0aW1lLnRpbWUoKQogICAgICAgICB0cnk6
-            Ci0gICAgICAgICAgICByZXNwb25zZSA9IHNlbGYuX2RvX3NlYXJjaChxdWVyeSwgYXBpX2tleSwg
-            bWF4X3Jlc3VsdHMsIGRheXM9ZGF5cywgdG9waWM9dG9waWMpCisgICAgICAgICAgICByZXNwb25z
-            ZSA9IHNlbGYuX2RvX3NlYXJjaCgKKyAgICAgICAgICAgICAgICBxdWVyeSwKKyAgICAgICAgICAg
-            ICAgICBhcGlfa2V5LAorICAgICAgICAgICAgICAgIG1heF9yZXN1bHRzLAorICAgICAgICAgICAg
-            ICAgIGRheXM9ZGF5cywKKyAgICAgICAgICAgICAgICB0b3BpYz10b3BpYywKKyAgICAgICAgICAg
-            ICAgICBpbmNsdWRlX2RvbWFpbnM9aW5jbHVkZV9kb21haW5zLAorICAgICAgICAgICAgKQogICAg
-            ICAgICAgICAgcmVzcG9uc2Uuc2VhcmNoX3RpbWUgPSB0aW1lLnRpbWUoKSAtIHN0YXJ0X3RpbWUK
-            IAogICAgICAgICAgICAgaWYgcmVzcG9uc2Uuc3VjY2VzczoKQEAgLTIzODksNyArMjQxMiw3IEBA
-            IGNsYXNzIFNlYXJjaFNlcnZpY2U6CiAgICAgICAgIHNlcnBhcGlfa2V5czogT3B0aW9uYWxbTGlz
-            dFtzdHJdXSA9IE5vbmUsCiAgICAgICAgIG1pbmltYXhfa2V5czogT3B0aW9uYWxbTGlzdFtzdHJd
-            XSA9IE5vbmUsCiAgICAgICAgIHNlYXJ4bmdfYmFzZV91cmxzOiBPcHRpb25hbFtMaXN0W3N0cl1d
-            ID0gTm9uZSwKLSAgICAgICAgc2VhcnhuZ19wdWJsaWNfaW5zdGFuY2VzX2VuYWJsZWQ6IGJvb2wg
-            PSBUcnVlLAorICAgICAgICBzZWFyeG5nX3B1YmxpY19pbnN0YW5jZXNfZW5hYmxlZDogYm9vbCA9
-            IEZhbHNlLAogICAgICAgICBuZXdzX21heF9hZ2VfZGF5czogaW50ID0gMywKICAgICAgICAgbmV3
-            c19zdHJhdGVneV9wcm9maWxlOiBzdHIgPSAic2hvcnQiLAogICAgICk6CkBAIC0yNDA0LDcgKzI0
-            MjcsNyBAQCBjbGFzcyBTZWFyY2hTZXJ2aWNlOgogICAgICAgICAgICAgc2VycGFwaV9rZXlzOiBT
-            ZXJwQVBJIEtleSDliJfooagKICAgICAgICAgICAgIG1pbmltYXhfa2V5czogTWluaU1heCBBUEkg
-            S2V5IOWIl+ihqAogICAgICAgICAgICAgc2VhcnhuZ19iYXNlX3VybHM6IFNlYXJYTkcg5a6e5L6L
-            5Zyw5Z2A5YiX6KGo77yI6Ieq5bu65peg6YWN6aKd5YWc5bqV77yJCi0gICAgICAgICAgICBzZWFy
-            eG5nX3B1YmxpY19pbnN0YW5jZXNfZW5hYmxlZDog5pyq6YWN572u6Ieq5bu65a6e5L6L5pe277yM
-            5piv5ZCm6Ieq5Yqo5L2/55So5YWs5YWxIFNlYXJYTkcg5a6e5L6LCisgICAgICAgICAgICBzZWFy
-            eG5nX3B1YmxpY19pbnN0YW5jZXNfZW5hYmxlZDog5pyq6YWN572u6Ieq5bu65a6e5L6L5pe277yM
-            5piv5ZCm5Li75Yqo5L2/55So5YWs5YWxIFNlYXJYTkcg5a6e5L6L77yI6buY6K6k5YWz6Zet77yJ
-            CiAgICAgICAgICAgICBuZXdzX21heF9hZ2VfZGF5czog5paw6Ze75pyA5aSn5pe25pWI77yI5aSp
-            77yJCiAgICAgICAgICAgICBuZXdzX3N0cmF0ZWd5X3Byb2ZpbGU6IOaWsOmXu+eql+WPo+etlueV
-            peaho+S9je+8iHVsdHJhX3Nob3J0L3Nob3J0L21lZGl1bS9sb25n77yJCiAgICAgICAgICIiIgpA
-            QCAtNDQ2NCw2ICs0NDg3LDEyIEBAIGNsYXNzIFNlYXJjaFNlcnZpY2U6CiAgICAgICAgICAgICAg
-            ICAgICAgICksCiAgICAgICAgICAgICAgICAgICAgICdkZXNjJzogJ+WFrOWPuOWFrOWRiicsCiAg
-            ICAgICAgICAgICAgICAgICAgICd0YXZpbHlfdG9waWMnOiAnbmV3cycsCisgICAgICAgICAgICAg
-            ICAgICAgICd0YXZpbHlfaW5jbHVkZV9kb21haW5zJzogWworICAgICAgICAgICAgICAgICAgICAg
-            ICAgJ2NuaW5mby5jb20uY24nLAorICAgICAgICAgICAgICAgICAgICAgICAgJ3NzZS5jb20uY24n
-            LAorICAgICAgICAgICAgICAgICAgICAgICAgJ3N6c2UuY24nLAorICAgICAgICAgICAgICAgICAg
-            ICAgICAgJ2JzZS5jbicsCisgICAgICAgICAgICAgICAgICAgIF0sCiAgICAgICAgICAgICAgICAg
-            ICAgICdzdHJpY3RfZnJlc2huZXNzJzogVHJ1ZSwKICAgICAgICAgICAgICAgICB9LAogICAgICAg
-            ICAgICAgICAgIHsKQEAgLTQ1MzQsMTIgKzQ1NjMsMTUgQEAgY2xhc3MgU2VhcmNoU2VydmljZToK
-            ICAgICAgICAgICAgICAgICByZXF1ZXN0X2RheXMsCiAgICAgICAgICAgICApCiAKLSAgICAgICAg
-            ICAgIGlmIGlzaW5zdGFuY2UocHJvdmlkZXIsIFRhdmlseVNlYXJjaFByb3ZpZGVyKSBhbmQgZGlt
-            LmdldCgndGF2aWx5X3RvcGljJyk6CisgICAgICAgICAgICBpZiBpc2luc3RhbmNlKHByb3ZpZGVy
-            LCBUYXZpbHlTZWFyY2hQcm92aWRlcikgYW5kICgKKyAgICAgICAgICAgICAgICBkaW0uZ2V0KCd0
-            YXZpbHlfdG9waWMnKSBvciBkaW0uZ2V0KCd0YXZpbHlfaW5jbHVkZV9kb21haW5zJykKKyAgICAg
-            ICAgICAgICk6CiAgICAgICAgICAgICAgICAgcmVzcG9uc2UgPSBwcm92aWRlci5zZWFyY2goCiAg
-            ICAgICAgICAgICAgICAgICAgIGRpbVsncXVlcnknXSwKICAgICAgICAgICAgICAgICAgICAgbWF4
-            X3Jlc3VsdHM9cHJvdmlkZXJfbWF4X3Jlc3VsdHMsCiAgICAgICAgICAgICAgICAgICAgIGRheXM9
-            cmVxdWVzdF9kYXlzLAogICAgICAgICAgICAgICAgICAgICB0b3BpYz1kaW1bJ3RhdmlseV90b3Bp
-            YyddLAorICAgICAgICAgICAgICAgICAgICBpbmNsdWRlX2RvbWFpbnM9ZGltLmdldCgndGF2aWx5
-            X2luY2x1ZGVfZG9tYWlucycpLAogICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgIGVsc2U6
-            CiAgICAgICAgICAgICAgICAgcmVzcG9uc2UgPSBwcm92aWRlci5zZWFyY2goCkBAIC00NjUzLDgg
-            KzQ2ODUsMTEgQEAgY2xhc3MgU2VhcmNoU2VydmljZToKICAgICAgICAgICAgICAgICAgICAgICAg
-            IGlmIHIucmVsZXZhbmNlX3JlYXNvbnM6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgcmVs
-            ZXZhbmNlX3BhcnRzLmFwcGVuZChmIuS+neaNrjogeyfvvJsnLmpvaW4oci5yZWxldmFuY2VfcmVh
-            c29uc1s6M10pfSIpCiAgICAgICAgICAgICAgICAgICAgICAgICBsaW5lcy5hcHBlbmQoZiIgICAg
-            IOWFs+iBlOW6pjogeyc7ICcuam9pbihyZWxldmFuY2VfcGFydHMpfSIpCisgICAgICAgICAgICBl
-            bGlmIHJlc3Auc3VjY2VzczoKKyAgICAgICAgICAgICAgICBsaW5lcy5hcHBlbmQoIiAg5pCc57Si
-            5oiQ5Yqf77yM5L2G5Zyo5b2T5YmN5pe26Ze056qX5Y+j5YaF5pyq5om+5Yiw55u45YWz5L+h5oGv
-            IikKICAgICAgICAgICAgIGVsc2U6Ci0gICAgICAgICAgICAgICAgbGluZXMuYXBwZW5kKCIgIOac
-            quaJvuWIsOebuOWFs+S/oeaBryIpCisgICAgICAgICAgICAgICAgcmVhc29uID0gZiLvvIh7cmVz
-            cC5lcnJvcl9tZXNzYWdlfe+8iSIgaWYgcmVzcC5lcnJvcl9tZXNzYWdlIGVsc2UgIiIKKyAgICAg
-            ICAgICAgICAgICBsaW5lcy5hcHBlbmQoZiIgIOaQnOe0oua6kOaaguaXtuS4jeWPr+eUqO+8jOS4
-            jeiDveaNruatpOWIpOaWreayoeacieebuOWFs+S/oeaBr3tyZWFzb259IikKICAgICAgICAgCiAg
-            ICAgICAgIHJldHVybiAiXG4iLmpvaW4obGluZXMpCiAgICAgCmRpZmYgLS1naXQgYS90ZXN0cy90
-            ZXN0X2NvbmZpZ192YWxpZGF0ZV9zdHJ1Y3R1cmVkLnB5IGIvdGVzdHMvdGVzdF9jb25maWdfdmFs
-            aWRhdGVfc3RydWN0dXJlZC5weQppbmRleCAyMjM4NzNhMy4uY2Q0OWMyNjggMTAwNjQ0Ci0tLSBh
-            L3Rlc3RzL3Rlc3RfY29uZmlnX3ZhbGlkYXRlX3N0cnVjdHVyZWQucHkKKysrIGIvdGVzdHMvdGVz
-            dF9jb25maWdfdmFsaWRhdGVfc3RydWN0dXJlZC5weQpAQCAtNzA2LDYgKzcwNiwxNSBAQCBjbGFz
-            cyBUZXN0VmFsaWRhdGVTdHJ1Y3R1cmVkTm90aWZpY2F0aW9uOgogICAgICAgICBzZWFyY2hfaXNz
-            dWUgPSBuZXh0KGkgZm9yIGkgaW4gaW5mbyBpZiAi5pCc57Si5byV5pOOIiBpbiBpLm1lc3NhZ2Up
-            CiAgICAgICAgIGFzc2VydCBzZWFyY2hfaXNzdWUuZmllbGQgPT0gIkJPQ0hBX0FQSV9LRVlTIgog
-            CisgICAgZGVmIHRlc3RfcHVibGljX3NlYXJ4bmdfaXNfb3B0X2luX2J5X2RlZmF1bHQoc2VsZik6
-            CisgICAgICAgIHdpdGggcGF0Y2guZGljdCgKKyAgICAgICAgICAgICJvcy5lbnZpcm9uIiwKKyAg
-            ICAgICAgICAgIHsiRU5WX0ZJTEUiOiAiL3ByaXZhdGUvdG1wL2RzYS1ub25leGlzdGVudC1lbnYi
-            fSwKKyAgICAgICAgICAgIGNsZWFyPVRydWUsCisgICAgICAgICk6CisgICAgICAgICAgICBjZmcg
-            PSBDb25maWcuX2xvYWRfZnJvbV9lbnYoKQorICAgICAgICBhc3NlcnQgY2ZnLnNlYXJ4bmdfcHVi
-            bGljX2luc3RhbmNlc19lbmFibGVkIGlzIEZhbHNlCisKICAgICBkZWYgdGVzdF9zZWFyeG5nX2Nv
-            bmZpZ3VyZWRfbm9fc2VhcmNoX2luZm8oc2VsZik6CiAgICAgICAgICIiIldoZW4gc2VhcnhuZ19i
-            YXNlX3VybHMgaXMgY29uZmlndXJlZCwgbm8gJ3VuY29uZmlndXJlZCBzZWFyY2ggZW5naW5lJyBp
-            bmZvLiIiIgogICAgICAgICBjZmcgPSBfbWFrZV9jb25maWcoc2VhcnhuZ19iYXNlX3VybHM9WyJo
-            dHRwczovL3NlYXJ4LmV4YW1wbGUub3JnIl0pCmRpZmYgLS1naXQgYS90ZXN0cy90ZXN0X3NlYXJj
-            aF9uZXdzX2ZyZXNobmVzcy5weSBiL3Rlc3RzL3Rlc3Rfc2VhcmNoX25ld3NfZnJlc2huZXNzLnB5
-            CmluZGV4IDc5YzIxMTA2Li5hZDMwNmMwNSAxMDA2NDQKLS0tIGEvdGVzdHMvdGVzdF9zZWFyY2hf
-            bmV3c19mcmVzaG5lc3MucHkKKysrIGIvdGVzdHMvdGVzdF9zZWFyY2hfbmV3c19mcmVzaG5lc3Mu
-            cHkKQEAgLTE4NTgsNiArMTg1OCwyNyBAQCBjbGFzcyBTZWFyY2hOZXdzRnJlc2huZXNzVGVzdENh
-            c2UodW5pdHRlc3QuVGVzdENhc2UpOgogICAgICAgICBzZWxmLmFzc2VydEluKCJkaXJlY3RfY29t
-            cGFueV9uZXdzIiwgY29udGV4dCkKICAgICAgICAgc2VsZi5hc3NlcnRJbigi5qCH6aKY5ZG95Lit
-            6IKh56Wo5Luj56CBIDYwMDUxOSIsIGNvbnRleHQpCiAKKyAgICBkZWYgdGVzdF9zZWFyY2hfY29u
-            dGV4dF9kaXN0aW5ndWlzaGVzX291dGFnZV9mcm9tX2VtcHR5X3Jlc3VsdHMoc2VsZikgLT4gTm9u
-            ZToKKyAgICAgICAgdW5hdmFpbGFibGUgPSBTZWFyY2hSZXNwb25zZSgKKyAgICAgICAgICAgIHF1
-            ZXJ5PSLotLXlt57ojIXlj7DlhazlkYoiLAorICAgICAgICAgICAgcmVzdWx0cz1bXSwKKyAgICAg
-            ICAgICAgIHByb3ZpZGVyPSJUYXZpbHkiLAorICAgICAgICAgICAgc3VjY2Vzcz1GYWxzZSwKKyAg
-            ICAgICAgICAgIGVycm9yX21lc3NhZ2U9Iuivt+axgui2heaXtiIsCisgICAgICAgICkKKyAgICAg
-            ICAgZW1wdHkgPSBTZWFyY2hSZXNwb25zZSgKKyAgICAgICAgICAgIHF1ZXJ5PSLotLXlt57ojIXl
-            j7DlhazlkYoiLAorICAgICAgICAgICAgcmVzdWx0cz1bXSwKKyAgICAgICAgICAgIHByb3ZpZGVy
-            PSJUYXZpbHkiLAorICAgICAgICAgICAgc3VjY2Vzcz1UcnVlLAorICAgICAgICApCisKKyAgICAg
-            ICAgc2VsZi5hc3NlcnRFcXVhbCh1bmF2YWlsYWJsZS5vdXRjb21lLCAidW5hdmFpbGFibGUiKQor
-            ICAgICAgICBzZWxmLmFzc2VydEluKCLml6Dms5XmoLjlrp4iLCB1bmF2YWlsYWJsZS50b19jb250
-            ZXh0KCkpCisgICAgICAgIHNlbGYuYXNzZXJ0SW4oIuivt+axgui2heaXtiIsIHVuYXZhaWxhYmxl
-            LnRvX2NvbnRleHQoKSkKKyAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChlbXB0eS5vdXRjb21lLCAi
-            bm9fcmVzdWx0cyIpCisgICAgICAgIHNlbGYuYXNzZXJ0SW4oIuacquaJvuWIsOebuOWFs+e7k+ae
-            nCIsIGVtcHR5LnRvX2NvbnRleHQoKSkKKwogICAgIGRlZiB0ZXN0X3NlYXJjaF9zdG9ja19uZXdz
-            X2JyYXZlX2xvY2FsZV9tYXRjaGVzX21hcmtldF9jb250ZXh0KHNlbGYpIC0+IE5vbmU6CiAgICAg
-            ICAgICIiIkJyYXZlIGxvY2FsZSBzaG91bGQgZm9sbG93IENoaW5lc2UtcHJlZmVycmVkIHZzIFVT
-            LXN0b2NrIGNvbnRleHRzLiIiIgogICAgICAgICBmcmVzaF9kdCA9IGRhdGV0aW1lLm5vdyh0aW1l
-            em9uZS51dGMpLnJlcGxhY2UobWljcm9zZWNvbmQ9MCkKZGlmZiAtLWdpdCBhL3Rlc3RzL3Rlc3Rf
-            c2VhcmNoX3RhdmlseV9wcm92aWRlci5weSBiL3Rlc3RzL3Rlc3Rfc2VhcmNoX3RhdmlseV9wcm92
-            aWRlci5weQppbmRleCA2ZWFhYzFmZC4uM2IxYmE1NmUgMTAwNjQ0Ci0tLSBhL3Rlc3RzL3Rlc3Rf
-            c2VhcmNoX3RhdmlseV9wcm92aWRlci5weQorKysgYi90ZXN0cy90ZXN0X3NlYXJjaF90YXZpbHlf
-            cHJvdmlkZXIucHkKQEAgLTc2LDcgKzc2LDcgQEAgY2xhc3MgVGVzdFRhdmlseVNlYXJjaFByb3Zp
-            ZGVyKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChfRmFrZVRh
-            dmlseUNsaWVudC5zZWFyY2hfY2FsbHNbMF1bInRvcGljIl0sICJuZXdzIikKICAgICAgICAgc2Vs
-            Zi5hc3NlcnRFcXVhbChfRmFrZVRhdmlseUNsaWVudC5zZWFyY2hfY2FsbHNbMF1bImRheXMiXSwg
-            MykKICAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChfRmFrZVRhdmlseUNsaWVudC5zZWFyY2hfY2Fs
-            bHNbMF1bIm1heF9yZXN1bHRzIl0sIDUpCi0gICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoX0Zha2VU
-            YXZpbHlDbGllbnQuc2VhcmNoX2NhbGxzWzBdWyJzZWFyY2hfZGVwdGgiXSwgImFkdmFuY2VkIikK
-            KyAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChfRmFrZVRhdmlseUNsaWVudC5zZWFyY2hfY2FsbHNb
-            MF1bInNlYXJjaF9kZXB0aCJdLCAiYmFzaWMiKQogICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGxl
-            bihyZXNwLnJlc3VsdHMpLCAxKQogICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJlc3AucmVzdWx0
-            c1swXS5wdWJsaXNoZWRfZGF0ZSwgcHVibGlzaGVkX3RleHQpCiAgICAgICAgIHNlbGYuYXNzZXJ0
-            RXF1YWwocmVzcC5yZXN1bHRzWzBdLnVybCwgImh0dHBzOi8vZXhhbXBsZS5jb20vYWxpYmFiYS1l
-            YXJuaW5ncyIpCkBAIC0yNzAsNiArMjcwLDM1IEBAIGNsYXNzIFRlc3RUYXZpbHlTZWFyY2hQcm92
-            aWRlcih1bml0dGVzdC5UZXN0Q2FzZSk6CiAgICAgICAgIHNlbGYuYXNzZXJ0Tm90SW4oInRvcGlj
-            IiwgX0Zha2VUYXZpbHlDbGllbnQuc2VhcmNoX2NhbGxzWzFdKQogICAgICAgICBzZWxmLmFzc2Vy
-            dEVxdWFsKF9GYWtlVGF2aWx5Q2xpZW50LnNlYXJjaF9jYWxsc1syXVsidG9waWMiXSwgIm5ld3Mi
-            KQogCisgICAgZGVmIHRlc3RfYV9zaGFyZV9hbm5vdW5jZW1lbnRfc2VhcmNoX2xpbWl0c190YXZp
-            bHlfdG9fb2ZmaWNpYWxfZG9tYWlucyhzZWxmKSAtPiBOb25lOgorICAgICAgICBwdWJsaXNoZWRf
-            dGV4dCA9IGRhdGV0aW1lLm5vdyh0aW1lem9uZS51dGMpLnJlcGxhY2UobWljcm9zZWNvbmQ9MCku
-            c3RyZnRpbWUoCisgICAgICAgICAgICAiJVktJW0tJWRUJUg6JU06JVNaIgorICAgICAgICApCisg
-            ICAgICAgIHdpdGggc2VsZi5fcGF0Y2hfdGF2aWx5KAorICAgICAgICAgICAgeworICAgICAgICAg
-            ICAgICAgICJyZXN1bHRzIjogWworICAgICAgICAgICAgICAgICAgICB7CisgICAgICAgICAgICAg
-            ICAgICAgICAgICAidGl0bGUiOiAi6LS15bee6IyF5Y+w5Y+R5biD6JGj5LqL5Lya5YWs5ZGKIiwK
-            KyAgICAgICAgICAgICAgICAgICAgICAgICJ1cmwiOiAiaHR0cHM6Ly93d3cuc3NlLmNvbS5jbi9k
-            aXNjbG9zdXJlL2V4YW1wbGUiLAorICAgICAgICAgICAgICAgICAgICAgICAgImNvbnRlbnQiOiAi
-            5YWs5Y+45oqr6Zyy6JGj5LqL5Lya5Yaz6K6u44CCIiwKKyAgICAgICAgICAgICAgICAgICAgICAg
-            ICJwdWJsaXNoZWRfZGF0ZSI6IHB1Ymxpc2hlZF90ZXh0LAorICAgICAgICAgICAgICAgICAgICB9
-            CisgICAgICAgICAgICAgICAgXQorICAgICAgICAgICAgfQorICAgICAgICApOgorICAgICAgICAg
-            ICAgc2VydmljZSA9IFNlYXJjaFNlcnZpY2UoCisgICAgICAgICAgICAgICAgdGF2aWx5X2tleXM9
-            WyJkdW1teV9rZXkiXSwKKyAgICAgICAgICAgICAgICBzZWFyeG5nX3B1YmxpY19pbnN0YW5jZXNf
-            ZW5hYmxlZD1GYWxzZSwKKyAgICAgICAgICAgICkKKyAgICAgICAgICAgIHNlcnZpY2Uuc2VhcmNo
-            X2NvbXByZWhlbnNpdmVfaW50ZWwoIjYwMDUxOSIsICLotLXlt57ojIXlj7AiLCBtYXhfc2VhcmNo
-            ZXM9NCkKKworICAgICAgICBhbm5vdW5jZW1lbnRfY2FsbCA9IF9GYWtlVGF2aWx5Q2xpZW50LnNl
-            YXJjaF9jYWxsc1szXQorICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGFubm91bmNlbWVudF9jYWxs
-            WyJ0b3BpYyJdLCAibmV3cyIpCisgICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoCisgICAgICAgICAg
-            ICBhbm5vdW5jZW1lbnRfY2FsbFsiaW5jbHVkZV9kb21haW5zIl0sCisgICAgICAgICAgICBbImNu
-            aW5mby5jb20uY24iLCAic3NlLmNvbS5jbiIsICJzenNlLmNuIiwgImJzZS5jbiJdLAorICAgICAg
-            ICApCisKIAogaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgICB1bml0dGVzdC5tYWluKCkK
-            ZGlmZiAtLWdpdCBhL3Rlc3RzL3Rlc3Rfc2VhcnhuZ19lbnZfZG9jcy5weSBiL3Rlc3RzL3Rlc3Rf
-            c2VhcnhuZ19lbnZfZG9jcy5weQppbmRleCBiZWMxY2MwZC4uYWU1NGZiZmQgMTAwNjQ0Ci0tLSBh
-            L3Rlc3RzL3Rlc3Rfc2VhcnhuZ19lbnZfZG9jcy5weQorKysgYi90ZXN0cy90ZXN0X3NlYXJ4bmdf
-            ZW52X2RvY3MucHkKQEAgLTgsNyArOCw3IEBAIGRlZiB0ZXN0X2Vudl9leGFtcGxlX2RvY3VtZW50
-            c19zZWFyeG5nX2FjdGlvbnNfdmFyaWFibGVfbWFwcGluZygpIC0+IE5vbmU6CiAgICAgZW52X2V4
-            YW1wbGUgPSAoUk9PVF9ESVIgLyAiLmVudi5leGFtcGxlIikucmVhZF90ZXh0KGVuY29kaW5nPSJ1
-            dGYtOCIpCiAKICAgICBzdGFydCA9IGVudl9leGFtcGxlLmluZGV4KCIjIFNlYXJYTkcg5a6e5L6L
-            5Zyw5Z2AIikKLSAgICBlbmQgPSBlbnZfZXhhbXBsZS5pbmRleCgiU0VBUlhOR19QVUJMSUNfSU5T
-            VEFOQ0VTX0VOQUJMRUQ9dHJ1ZSIsIHN0YXJ0KQorICAgIGVuZCA9IGVudl9leGFtcGxlLmluZGV4
-            KCJTRUFSWE5HX1BVQkxJQ19JTlNUQU5DRVNfRU5BQkxFRD1mYWxzZSIsIHN0YXJ0KQogICAgIHNl
-            YXJ4bmdfYmxvY2sgPSBlbnZfZXhhbXBsZVtzdGFydDplbmRdCiAKICAgICBhc3NlcnQgIkdpdEh1
-            YiBBY3Rpb25zIiBpbiBzZWFyeG5nX2Jsb2NrCg==
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 安装依赖
         run: |
-          printf '%s' "$PATCH_B64" | base64 -d | git apply --exclude=.github/workflows/00-daily-analysis.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "fix: stabilize free news search sources"
-          git push origin HEAD:codex/a-share-analysis-hardening
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          python -c "import futu; print('✅ futu SDK import OK')"
+      
+      - name: 创建必要目录
+        run: |
+          mkdir -p data logs reports
+      
+      - name: 执行股票分析
+        env:
+          # ==========================================
+          # AI 配置
+          # ==========================================
+          GENERATION_BACKEND: ${{ vars.GENERATION_BACKEND || secrets.GENERATION_BACKEND }}
+          GENERATION_FALLBACK_BACKEND: ${{ vars.GENERATION_FALLBACK_BACKEND || secrets.GENERATION_FALLBACK_BACKEND || 'litellm' }}
+          GENERATION_BACKEND_TIMEOUT_SECONDS: ${{ vars.GENERATION_BACKEND_TIMEOUT_SECONDS || secrets.GENERATION_BACKEND_TIMEOUT_SECONDS }}
+          GENERATION_BACKEND_MAX_OUTPUT_BYTES: ${{ vars.GENERATION_BACKEND_MAX_OUTPUT_BYTES || secrets.GENERATION_BACKEND_MAX_OUTPUT_BYTES }}
+          GENERATION_BACKEND_MAX_CONCURRENCY: ${{ vars.GENERATION_BACKEND_MAX_CONCURRENCY || secrets.GENERATION_BACKEND_MAX_CONCURRENCY }}
+          LOCAL_CLI_BACKEND_MAX_CONCURRENCY: ${{ vars.LOCAL_CLI_BACKEND_MAX_CONCURRENCY || secrets.LOCAL_CLI_BACKEND_MAX_CONCURRENCY }}
+          AGENT_GENERATION_BACKEND: ${{ vars.AGENT_GENERATION_BACKEND || secrets.AGENT_GENERATION_BACKEND }}
+          # LITELLM_CONFIG
+          LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
+          LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
+          AGENT_LITELLM_MODEL: ${{ vars.AGENT_LITELLM_MODEL || secrets.AGENT_LITELLM_MODEL }}
+          VISION_MODEL: ${{ vars.VISION_MODEL || secrets.VISION_MODEL }}
+          OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL || secrets.OPENAI_VISION_MODEL }}
+          VISION_PROVIDER_PRIORITY: ${{ vars.VISION_PROVIDER_PRIORITY || secrets.VISION_PROVIDER_PRIORITY }}
+          LLM_TEMPERATURE: ${{ vars.LLM_TEMPERATURE || secrets.LLM_TEMPERATURE }}
+          LLM_USAGE_HMAC_SECRET: ${{ secrets.LLM_USAGE_HMAC_SECRET }}
+          LLM_USAGE_HMAC_KEY_VERSION: ${{ vars.LLM_USAGE_HMAC_KEY_VERSION || secrets.LLM_USAGE_HMAC_KEY_VERSION }}
+          LLM_PROMPT_CACHE_TELEMETRY_ENABLED: ${{ vars.LLM_PROMPT_CACHE_TELEMETRY_ENABLED || secrets.LLM_PROMPT_CACHE_TELEMETRY_ENABLED }}
+          LLM_PROMPT_CACHE_HINTS_ENABLED: ${{ vars.LLM_PROMPT_CACHE_HINTS_ENABLED || secrets.LLM_PROMPT_CACHE_HINTS_ENABLED }}
+          LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL: ${{ vars.LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL || secrets.LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL }}
+          LLM_CHANNELS: ${{ vars.LLM_CHANNELS || secrets.LLM_CHANNELS }}
+          # Hermes 是本地 loopback generation preset；API Key 只从 Secrets 注入。
+          # GitHub-hosted runner 的 127.0.0.1 不是用户电脑，本配置通常只适合 self-hosted runner。
+          LLM_HERMES_PROTOCOL: ${{ vars.LLM_HERMES_PROTOCOL || secrets.LLM_HERMES_PROTOCOL }}
+          LLM_HERMES_API_SURFACE: ${{ vars.LLM_HERMES_API_SURFACE || secrets.LLM_HERMES_API_SURFACE }}
+          LLM_HERMES_BASE_URL: ${{ vars.LLM_HERMES_BASE_URL || secrets.LLM_HERMES_BASE_URL }}
+          LLM_HERMES_API_KEY: ${{ secrets.LLM_HERMES_API_KEY }}
+          LLM_HERMES_MODELS: ${{ vars.LLM_HERMES_MODELS || secrets.LLM_HERMES_MODELS }}
+          LLM_HERMES_ENABLED: ${{ vars.LLM_HERMES_ENABLED || secrets.LLM_HERMES_ENABLED }}
+
+          # Gemini AI（主选）
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          GEMINI_REQUEST_DELAY: '3.0'
+          
+          # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
+          AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
+
+          # OpenAI 兼容 API（备选）
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+
+          # DeepSeek
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_API_KEYS: ${{ secrets.DEEPSEEK_API_KEYS }}
+          
+          # Anthropic / Claude
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || secrets.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022' }}
+
+          # LLM 渠道模式（常见渠道名需显式映射，GitHub Actions 不会自动导入任意 Secret/Variable）
+          LLM_PRIMARY_PROTOCOL: ${{ vars.LLM_PRIMARY_PROTOCOL || secrets.LLM_PRIMARY_PROTOCOL }}
+          LLM_PRIMARY_API_SURFACE: ${{ vars.LLM_PRIMARY_API_SURFACE || secrets.LLM_PRIMARY_API_SURFACE }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.LLM_PRIMARY_BASE_URL || secrets.LLM_PRIMARY_BASE_URL }}
+          LLM_PRIMARY_API_KEY: ${{ secrets.LLM_PRIMARY_API_KEY }}
+          LLM_PRIMARY_API_KEYS: ${{ secrets.LLM_PRIMARY_API_KEYS }}
+          LLM_PRIMARY_MODELS: ${{ vars.LLM_PRIMARY_MODELS || secrets.LLM_PRIMARY_MODELS }}
+          LLM_PRIMARY_ENABLED: ${{ vars.LLM_PRIMARY_ENABLED || secrets.LLM_PRIMARY_ENABLED }}
+          LLM_PRIMARY_EXTRA_HEADERS: ${{ vars.LLM_PRIMARY_EXTRA_HEADERS || secrets.LLM_PRIMARY_EXTRA_HEADERS }}
+
+          LLM_SECONDARY_PROTOCOL: ${{ vars.LLM_SECONDARY_PROTOCOL || secrets.LLM_SECONDARY_PROTOCOL }}
+          LLM_SECONDARY_API_SURFACE: ${{ vars.LLM_SECONDARY_API_SURFACE || secrets.LLM_SECONDARY_API_SURFACE }}
+          LLM_SECONDARY_BASE_URL: ${{ vars.LLM_SECONDARY_BASE_URL || secrets.LLM_SECONDARY_BASE_URL }}
+          LLM_SECONDARY_API_KEY: ${{ secrets.LLM_SECONDARY_API_KEY }}
+          LLM_SECONDARY_API_KEYS: ${{ secrets.LLM_SECONDARY_API_KEYS }}
+          LLM_SECONDARY_MODELS: ${{ vars.LLM_SECONDARY_MODELS || secrets.LLM_SECONDARY_MODELS }}
+          LLM_SECONDARY_ENABLED: ${{ vars.LLM_SECONDARY_ENABLED || secrets.LLM_SECONDARY_ENABLED }}
+          LLM_SECONDARY_EXTRA_HEADERS: ${{ vars.LLM_SECONDARY_EXTRA_HEADERS || secrets.LLM_SECONDARY_EXTRA_HEADERS }}
+
+          LLM_GEMINI_PROTOCOL: ${{ vars.LLM_GEMINI_PROTOCOL || secrets.LLM_GEMINI_PROTOCOL }}
+          LLM_GEMINI_API_SURFACE: ${{ vars.LLM_GEMINI_API_SURFACE || secrets.LLM_GEMINI_API_SURFACE }}
+          LLM_GEMINI_BASE_URL: ${{ vars.LLM_GEMINI_BASE_URL || secrets.LLM_GEMINI_BASE_URL }}
+          LLM_GEMINI_API_KEY: ${{ secrets.LLM_GEMINI_API_KEY }}
+          LLM_GEMINI_API_KEYS: ${{ secrets.LLM_GEMINI_API_KEYS }}
+          LLM_GEMINI_MODELS: ${{ vars.LLM_GEMINI_MODELS || secrets.LLM_GEMINI_MODELS }}
+          LLM_GEMINI_ENABLED: ${{ vars.LLM_GEMINI_ENABLED || secrets.LLM_GEMINI_ENABLED }}
+          LLM_GEMINI_EXTRA_HEADERS: ${{ vars.LLM_GEMINI_EXTRA_HEADERS || secrets.LLM_GEMINI_EXTRA_HEADERS }}
+
+          LLM_DEEPSEEK_PROTOCOL: ${{ vars.LLM_DEEPSEEK_PROTOCOL || secrets.LLM_DEEPSEEK_PROTOCOL }}
+          LLM_DEEPSEEK_API_SURFACE: ${{ vars.LLM_DEEPSEEK_API_SURFACE || secrets.LLM_DEEPSEEK_API_SURFACE }}
+          LLM_DEEPSEEK_BASE_URL: ${{ vars.LLM_DEEPSEEK_BASE_URL || secrets.LLM_DEEPSEEK_BASE_URL }}
+          LLM_DEEPSEEK_API_KEY: ${{ secrets.LLM_DEEPSEEK_API_KEY }}
+          LLM_DEEPSEEK_API_KEYS: ${{ secrets.LLM_DEEPSEEK_API_KEYS }}
+          LLM_DEEPSEEK_MODELS: ${{ vars.LLM_DEEPSEEK_MODELS || secrets.LLM_DEEPSEEK_MODELS }}
+          LLM_DEEPSEEK_ENABLED: ${{ vars.LLM_DEEPSEEK_ENABLED || secrets.LLM_DEEPSEEK_ENABLED }}
+          LLM_DEEPSEEK_EXTRA_HEADERS: ${{ vars.LLM_DEEPSEEK_EXTRA_HEADERS || secrets.LLM_DEEPSEEK_EXTRA_HEADERS }}
+
+          LLM_AIHUBMIX_PROTOCOL: ${{ vars.LLM_AIHUBMIX_PROTOCOL || secrets.LLM_AIHUBMIX_PROTOCOL }}
+          LLM_AIHUBMIX_API_SURFACE: ${{ vars.LLM_AIHUBMIX_API_SURFACE || secrets.LLM_AIHUBMIX_API_SURFACE }}
+          LLM_AIHUBMIX_BASE_URL: ${{ vars.LLM_AIHUBMIX_BASE_URL || secrets.LLM_AIHUBMIX_BASE_URL }}
+          LLM_AIHUBMIX_API_KEY: ${{ secrets.LLM_AIHUBMIX_API_KEY }}
+          LLM_AIHUBMIX_API_KEYS: ${{ secrets.LLM_AIHUBMIX_API_KEYS }}
+          LLM_AIHUBMIX_MODELS: ${{ vars.LLM_AIHUBMIX_MODELS || secrets.LLM_AIHUBMIX_MODELS }}
+          LLM_AIHUBMIX_ENABLED: ${{ vars.LLM_AIHUBMIX_ENABLED || secrets.LLM_AIHUBMIX_ENABLED }}
+          LLM_AIHUBMIX_EXTRA_HEADERS: ${{ vars.LLM_AIHUBMIX_EXTRA_HEADERS || secrets.LLM_AIHUBMIX_EXTRA_HEADERS }}
+
+          LLM_ANSPIRE_PROTOCOL: ${{ vars.LLM_ANSPIRE_PROTOCOL || secrets.LLM_ANSPIRE_PROTOCOL }}
+          LLM_ANSPIRE_API_SURFACE: ${{ vars.LLM_ANSPIRE_API_SURFACE || secrets.LLM_ANSPIRE_API_SURFACE }}
+          LLM_ANSPIRE_BASE_URL: ${{ vars.LLM_ANSPIRE_BASE_URL || secrets.LLM_ANSPIRE_BASE_URL }}
+          LLM_ANSPIRE_API_KEY: ${{ secrets.LLM_ANSPIRE_API_KEY }}
+          LLM_ANSPIRE_API_KEYS: ${{ secrets.LLM_ANSPIRE_API_KEYS }}
+          LLM_ANSPIRE_MODELS: ${{ vars.LLM_ANSPIRE_MODELS || secrets.LLM_ANSPIRE_MODELS }}
+          LLM_ANSPIRE_ENABLED: ${{ vars.LLM_ANSPIRE_ENABLED || secrets.LLM_ANSPIRE_ENABLED }}
+          LLM_ANSPIRE_EXTRA_HEADERS: ${{ vars.LLM_ANSPIRE_EXTRA_HEADERS || secrets.LLM_ANSPIRE_EXTRA_HEADERS }}
+
+          LLM_OPENAI_PROTOCOL: ${{ vars.LLM_OPENAI_PROTOCOL || secrets.LLM_OPENAI_PROTOCOL }}
+          LLM_OPENAI_API_SURFACE: ${{ vars.LLM_OPENAI_API_SURFACE || secrets.LLM_OPENAI_API_SURFACE }}
+          LLM_OPENAI_BASE_URL: ${{ vars.LLM_OPENAI_BASE_URL || secrets.LLM_OPENAI_BASE_URL }}
+          LLM_OPENAI_API_KEY: ${{ secrets.LLM_OPENAI_API_KEY }}
+          LLM_OPENAI_API_KEYS: ${{ secrets.LLM_OPENAI_API_KEYS }}
+          LLM_OPENAI_MODELS: ${{ vars.LLM_OPENAI_MODELS || secrets.LLM_OPENAI_MODELS }}
+          LLM_OPENAI_ENABLED: ${{ vars.LLM_OPENAI_ENABLED || secrets.LLM_OPENAI_ENABLED }}
+          LLM_OPENAI_EXTRA_HEADERS: ${{ vars.LLM_OPENAI_EXTRA_HEADERS || secrets.LLM_OPENAI_EXTRA_HEADERS }}
+
+          LLM_ANTHROPIC_PROTOCOL: ${{ vars.LLM_ANTHROPIC_PROTOCOL || secrets.LLM_ANTHROPIC_PROTOCOL }}
+          LLM_ANTHROPIC_API_SURFACE: ${{ vars.LLM_ANTHROPIC_API_SURFACE || secrets.LLM_ANTHROPIC_API_SURFACE }}
+          LLM_ANTHROPIC_BASE_URL: ${{ vars.LLM_ANTHROPIC_BASE_URL || secrets.LLM_ANTHROPIC_BASE_URL }}
+          LLM_ANTHROPIC_API_KEY: ${{ secrets.LLM_ANTHROPIC_API_KEY }}
+          LLM_ANTHROPIC_API_KEYS: ${{ secrets.LLM_ANTHROPIC_API_KEYS }}
+          LLM_ANTHROPIC_MODELS: ${{ vars.LLM_ANTHROPIC_MODELS || secrets.LLM_ANTHROPIC_MODELS }}
+          LLM_ANTHROPIC_ENABLED: ${{ vars.LLM_ANTHROPIC_ENABLED || secrets.LLM_ANTHROPIC_ENABLED }}
+          LLM_ANTHROPIC_EXTRA_HEADERS: ${{ vars.LLM_ANTHROPIC_EXTRA_HEADERS || secrets.LLM_ANTHROPIC_EXTRA_HEADERS }}
+
+          LLM_MOONSHOT_PROTOCOL: ${{ vars.LLM_MOONSHOT_PROTOCOL || secrets.LLM_MOONSHOT_PROTOCOL }}
+          LLM_MOONSHOT_API_SURFACE: ${{ vars.LLM_MOONSHOT_API_SURFACE || secrets.LLM_MOONSHOT_API_SURFACE }}
+          LLM_MOONSHOT_BASE_URL: ${{ vars.LLM_MOONSHOT_BASE_URL || secrets.LLM_MOONSHOT_BASE_URL }}
+          LLM_MOONSHOT_API_KEY: ${{ secrets.LLM_MOONSHOT_API_KEY }}
+          LLM_MOONSHOT_API_KEYS: ${{ secrets.LLM_MOONSHOT_API_KEYS }}
+          LLM_MOONSHOT_MODELS: ${{ vars.LLM_MOONSHOT_MODELS || secrets.LLM_MOONSHOT_MODELS }}
+          LLM_MOONSHOT_ENABLED: ${{ vars.LLM_MOONSHOT_ENABLED || secrets.LLM_MOONSHOT_ENABLED }}
+          LLM_MOONSHOT_EXTRA_HEADERS: ${{ vars.LLM_MOONSHOT_EXTRA_HEADERS || secrets.LLM_MOONSHOT_EXTRA_HEADERS }}
+
+          LLM_DASHSCOPE_PROTOCOL: ${{ vars.LLM_DASHSCOPE_PROTOCOL || secrets.LLM_DASHSCOPE_PROTOCOL }}
+          LLM_DASHSCOPE_API_SURFACE: ${{ vars.LLM_DASHSCOPE_API_SURFACE || secrets.LLM_DASHSCOPE_API_SURFACE }}
+          LLM_DASHSCOPE_BASE_URL: ${{ vars.LLM_DASHSCOPE_BASE_URL || secrets.LLM_DASHSCOPE_BASE_URL }}
+          LLM_DASHSCOPE_API_KEY: ${{ secrets.LLM_DASHSCOPE_API_KEY }}
+          LLM_DASHSCOPE_API_KEYS: ${{ secrets.LLM_DASHSCOPE_API_KEYS }}
+          LLM_DASHSCOPE_MODELS: ${{ vars.LLM_DASHSCOPE_MODELS || secrets.LLM_DASHSCOPE_MODELS }}
+          LLM_DASHSCOPE_ENABLED: ${{ vars.LLM_DASHSCOPE_ENABLED || secrets.LLM_DASHSCOPE_ENABLED }}
+          LLM_DASHSCOPE_EXTRA_HEADERS: ${{ vars.LLM_DASHSCOPE_EXTRA_HEADERS || secrets.LLM_DASHSCOPE_EXTRA_HEADERS }}
+
+          LLM_ZHIPU_PROTOCOL: ${{ vars.LLM_ZHIPU_PROTOCOL || secrets.LLM_ZHIPU_PROTOCOL }}
+          LLM_ZHIPU_API_SURFACE: ${{ vars.LLM_ZHIPU_API_SURFACE || secrets.LLM_ZHIPU_API_SURFACE }}
+          LLM_ZHIPU_BASE_URL: ${{ vars.LLM_ZHIPU_BASE_URL || secrets.LLM_ZHIPU_BASE_URL }}
+          LLM_ZHIPU_API_KEY: ${{ secrets.LLM_ZHIPU_API_KEY }}
+          LLM_ZHIPU_API_KEYS: ${{ secrets.LLM_ZHIPU_API_KEYS }}
+          LLM_ZHIPU_MODELS: ${{ vars.LLM_ZHIPU_MODELS || secrets.LLM_ZHIPU_MODELS }}
+          LLM_ZHIPU_ENABLED: ${{ vars.LLM_ZHIPU_ENABLED || secrets.LLM_ZHIPU_ENABLED }}
+          LLM_ZHIPU_EXTRA_HEADERS: ${{ vars.LLM_ZHIPU_EXTRA_HEADERS || secrets.LLM_ZHIPU_EXTRA_HEADERS }}
+
+          LLM_MINIMAX_PROTOCOL: ${{ vars.LLM_MINIMAX_PROTOCOL || secrets.LLM_MINIMAX_PROTOCOL }}
+          LLM_MINIMAX_API_SURFACE: ${{ vars.LLM_MINIMAX_API_SURFACE || secrets.LLM_MINIMAX_API_SURFACE }}
+          LLM_MINIMAX_BASE_URL: ${{ vars.LLM_MINIMAX_BASE_URL || secrets.LLM_MINIMAX_BASE_URL }}
+          LLM_MINIMAX_API_KEY: ${{ secrets.LLM_MINIMAX_API_KEY }}
+          LLM_MINIMAX_API_KEYS: ${{ secrets.LLM_MINIMAX_API_KEYS }}
+          LLM_MINIMAX_MODELS: ${{ vars.LLM_MINIMAX_MODELS || secrets.LLM_MINIMAX_MODELS }}
+          LLM_MINIMAX_ENABLED: ${{ vars.LLM_MINIMAX_ENABLED || secrets.LLM_MINIMAX_ENABLED }}
+          LLM_MINIMAX_EXTRA_HEADERS: ${{ vars.LLM_MINIMAX_EXTRA_HEADERS || secrets.LLM_MINIMAX_EXTRA_HEADERS }}
+
+          LLM_VOLCENGINE_PROTOCOL: ${{ vars.LLM_VOLCENGINE_PROTOCOL || secrets.LLM_VOLCENGINE_PROTOCOL }}
+          LLM_VOLCENGINE_API_SURFACE: ${{ vars.LLM_VOLCENGINE_API_SURFACE || secrets.LLM_VOLCENGINE_API_SURFACE }}
+          LLM_VOLCENGINE_BASE_URL: ${{ vars.LLM_VOLCENGINE_BASE_URL || secrets.LLM_VOLCENGINE_BASE_URL }}
+          LLM_VOLCENGINE_API_KEY: ${{ secrets.LLM_VOLCENGINE_API_KEY }}
+          LLM_VOLCENGINE_API_KEYS: ${{ secrets.LLM_VOLCENGINE_API_KEYS }}
+          LLM_VOLCENGINE_MODELS: ${{ vars.LLM_VOLCENGINE_MODELS || secrets.LLM_VOLCENGINE_MODELS }}
+          LLM_VOLCENGINE_ENABLED: ${{ vars.LLM_VOLCENGINE_ENABLED || secrets.LLM_VOLCENGINE_ENABLED }}
+          LLM_VOLCENGINE_EXTRA_HEADERS: ${{ vars.LLM_VOLCENGINE_EXTRA_HEADERS || secrets.LLM_VOLCENGINE_EXTRA_HEADERS }}
+
+          LLM_SILICONFLOW_PROTOCOL: ${{ vars.LLM_SILICONFLOW_PROTOCOL || secrets.LLM_SILICONFLOW_PROTOCOL }}
+          LLM_SILICONFLOW_API_SURFACE: ${{ vars.LLM_SILICONFLOW_API_SURFACE || secrets.LLM_SILICONFLOW_API_SURFACE }}
+          LLM_SILICONFLOW_BASE_URL: ${{ vars.LLM_SILICONFLOW_BASE_URL || secrets.LLM_SILICONFLOW_BASE_URL }}
+          LLM_SILICONFLOW_API_KEY: ${{ secrets.LLM_SILICONFLOW_API_KEY }}
+          LLM_SILICONFLOW_API_KEYS: ${{ secrets.LLM_SILICONFLOW_API_KEYS }}
+          LLM_SILICONFLOW_MODELS: ${{ vars.LLM_SILICONFLOW_MODELS || secrets.LLM_SILICONFLOW_MODELS }}
+          LLM_SILICONFLOW_ENABLED: ${{ vars.LLM_SILICONFLOW_ENABLED || secrets.LLM_SILICONFLOW_ENABLED }}
+          LLM_SILICONFLOW_EXTRA_HEADERS: ${{ vars.LLM_SILICONFLOW_EXTRA_HEADERS || secrets.LLM_SILICONFLOW_EXTRA_HEADERS }}
+
+          LLM_OPENROUTER_PROTOCOL: ${{ vars.LLM_OPENROUTER_PROTOCOL || secrets.LLM_OPENROUTER_PROTOCOL }}
+          LLM_OPENROUTER_API_SURFACE: ${{ vars.LLM_OPENROUTER_API_SURFACE || secrets.LLM_OPENROUTER_API_SURFACE }}
+          LLM_OPENROUTER_BASE_URL: ${{ vars.LLM_OPENROUTER_BASE_URL || secrets.LLM_OPENROUTER_BASE_URL }}
+          LLM_OPENROUTER_API_KEY: ${{ secrets.LLM_OPENROUTER_API_KEY }}
+          LLM_OPENROUTER_API_KEYS: ${{ secrets.LLM_OPENROUTER_API_KEYS }}
+          LLM_OPENROUTER_MODELS: ${{ vars.LLM_OPENROUTER_MODELS || secrets.LLM_OPENROUTER_MODELS }}
+          LLM_OPENROUTER_ENABLED: ${{ vars.LLM_OPENROUTER_ENABLED || secrets.LLM_OPENROUTER_ENABLED }}
+          LLM_OPENROUTER_EXTRA_HEADERS: ${{ vars.LLM_OPENROUTER_EXTRA_HEADERS || secrets.LLM_OPENROUTER_EXTRA_HEADERS }}
+
+          LLM_OLLAMA_PROTOCOL: ${{ vars.LLM_OLLAMA_PROTOCOL || secrets.LLM_OLLAMA_PROTOCOL }}
+          LLM_OLLAMA_API_SURFACE: ${{ vars.LLM_OLLAMA_API_SURFACE || secrets.LLM_OLLAMA_API_SURFACE }}
+          LLM_OLLAMA_BASE_URL: ${{ vars.LLM_OLLAMA_BASE_URL || secrets.LLM_OLLAMA_BASE_URL }}
+          LLM_OLLAMA_API_KEY: ${{ secrets.LLM_OLLAMA_API_KEY }}
+          LLM_OLLAMA_API_KEYS: ${{ secrets.LLM_OLLAMA_API_KEYS }}
+          LLM_OLLAMA_MODELS: ${{ vars.LLM_OLLAMA_MODELS || secrets.LLM_OLLAMA_MODELS }}
+          LLM_OLLAMA_ENABLED: ${{ vars.LLM_OLLAMA_ENABLED || secrets.LLM_OLLAMA_ENABLED }}
+          LLM_OLLAMA_EXTRA_HEADERS: ${{ vars.LLM_OLLAMA_EXTRA_HEADERS || secrets.LLM_OLLAMA_EXTRA_HEADERS }}
+
+          # ==========================================
+          # 数据源
+          # ==========================================
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          # Tushare Pro 自定义接入地址（可选；指向自建网关或第三方兼容镜像时设置）
+          TUSHARE_HTTP_URL: ${{ vars.TUSHARE_HTTP_URL || secrets.TUSHARE_HTTP_URL }}
+          # TickFlow（A 股日 K、实时行情、股票列表/名称与大盘复盘增强；不设则走免费源 fallback）
+          TICKFLOW_API_KEY: ${{ secrets.TICKFLOW_API_KEY }}
+          TICKFLOW_PRIORITY: ${{ vars.TICKFLOW_PRIORITY || secrets.TICKFLOW_PRIORITY }}
+          TICKFLOW_KLINE_ADJUST: ${{ vars.TICKFLOW_KLINE_ADJUST || secrets.TICKFLOW_KLINE_ADJUST }}
+          TICKFLOW_BATCH_DAILY_ENABLED: ${{ vars.TICKFLOW_BATCH_DAILY_ENABLED || secrets.TICKFLOW_BATCH_DAILY_ENABLED }}
+          TICKFLOW_BATCH_SIZE: ${{ vars.TICKFLOW_BATCH_SIZE || secrets.TICKFLOW_BATCH_SIZE }}
+          # Longbridge OpenAPI（美股/港股实时行情字段补充；不设则仅 YFinance/AkShare，无 [Longbridge] 调用）
+          LONGBRIDGE_OAUTH_CLIENT_ID: ${{ vars.LONGBRIDGE_OAUTH_CLIENT_ID || secrets.LONGBRIDGE_OAUTH_CLIENT_ID }}
+          LONGBRIDGE_OAUTH_TOKEN_CACHE_B64: ${{ secrets.LONGBRIDGE_OAUTH_TOKEN_CACHE_B64 }}
+          LONGBRIDGE_APP_KEY: ${{ secrets.LONGBRIDGE_APP_KEY }}
+          LONGBRIDGE_APP_SECRET: ${{ secrets.LONGBRIDGE_APP_SECRET }}
+          LONGBRIDGE_ACCESS_TOKEN: ${{ secrets.LONGBRIDGE_ACCESS_TOKEN }}
+          LONGBRIDGE_REGION: ${{ vars.LONGBRIDGE_REGION || secrets.LONGBRIDGE_REGION }}
+          LONGBRIDGE_HTTP_URL: ${{ vars.LONGBRIDGE_HTTP_URL || secrets.LONGBRIDGE_HTTP_URL }}
+          LONGBRIDGE_QUOTE_WS_URL: ${{ vars.LONGBRIDGE_QUOTE_WS_URL || secrets.LONGBRIDGE_QUOTE_WS_URL }}
+          LONGBRIDGE_TRADE_WS_URL: ${{ vars.LONGBRIDGE_TRADE_WS_URL || secrets.LONGBRIDGE_TRADE_WS_URL }}
+          LONGBRIDGE_STATIC_INFO_TTL_SECONDS: ${{ vars.LONGBRIDGE_STATIC_INFO_TTL_SECONDS || secrets.LONGBRIDGE_STATIC_INFO_TTL_SECONDS }}
+          LONGBRIDGE_ENABLE_OVERNIGHT: ${{ vars.LONGBRIDGE_ENABLE_OVERNIGHT || secrets.LONGBRIDGE_ENABLE_OVERNIGHT }}
+          LONGBRIDGE_PUSH_CANDLESTICK_MODE: ${{ vars.LONGBRIDGE_PUSH_CANDLESTICK_MODE || secrets.LONGBRIDGE_PUSH_CANDLESTICK_MODE }}
+          LONGBRIDGE_PRINT_QUOTE_PACKAGES: ${{ vars.LONGBRIDGE_PRINT_QUOTE_PACKAGES || secrets.LONGBRIDGE_PRINT_QUOTE_PACKAGES }}
+          
+          # ==========================================
+          # 搜索服务
+          # ==========================================
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }} 
+          ANSPIRE_LLM_MODEL: ${{ vars.ANSPIRE_LLM_MODEL || secrets.ANSPIRE_LLM_MODEL }}
+          ANSPIRE_LLM_BASE_URL: ${{ vars.ANSPIRE_LLM_BASE_URL || secrets.ANSPIRE_LLM_BASE_URL }}
+          ANSPIRE_LLM_ENABLED: ${{ vars.ANSPIRE_LLM_ENABLED || secrets.ANSPIRE_LLM_ENABLED }}
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          MINIMAX_API_KEYS: ${{ secrets.MINIMAX_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS }}
+          SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || secrets.SEARXNG_PUBLIC_INSTANCES_ENABLED }}
+          # 本地资讯池（默认不开启自动外部请求；在 Variables 中显式设为 true 后启用）
+          NEWS_INTEL_AUTO_FETCH_ENABLED: ${{ vars.NEWS_INTEL_AUTO_FETCH_ENABLED || secrets.NEWS_INTEL_AUTO_FETCH_ENABLED }}
+          NEWS_INTEL_RETENTION_DAYS: ${{ vars.NEWS_INTEL_RETENTION_DAYS || secrets.NEWS_INTEL_RETENTION_DAYS }}
+          NEWS_INTEL_FETCH_TIMEOUT_SEC: ${{ vars.NEWS_INTEL_FETCH_TIMEOUT_SEC || secrets.NEWS_INTEL_FETCH_TIMEOUT_SEC }}
+          NEWS_INTEL_MAX_ITEMS_PER_SOURCE: ${{ vars.NEWS_INTEL_MAX_ITEMS_PER_SOURCE || secrets.NEWS_INTEL_MAX_ITEMS_PER_SOURCE }}
+          NEWSNOW_BASE_URL: ${{ vars.NEWSNOW_BASE_URL || secrets.NEWSNOW_BASE_URL }}
+          
+          # ==========================================
+          # 通知渠道（可同时配置多个，全部推送）
+          # ==========================================
+          
+          # 方式一：企业微信 Webhook
+          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
+          WECHAT_MSG_TYPE: ${{ vars.WECHAT_MSG_TYPE || secrets.WECHAT_MSG_TYPE || 'markdown' }}
+          
+          # 方式二：飞书 Webhook
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          FEISHU_WEBHOOK_KEYWORD: ${{ vars.FEISHU_WEBHOOK_KEYWORD || secrets.FEISHU_WEBHOOK_KEYWORD }}
+          # 钉钉 Webhook
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          # 方式三：Telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
+          
+          # 方式四：邮件
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'daily_stock_analysis股票分析助手' }}
+          
+          # 方式五：Pushover
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
+
+          # 方式五扩展：ntfy
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+
+          # 方式五扩展：Gotify
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          
+          # 方式六：PushPlus ⬅️ 新增！
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ vars.PUSHPLUS_TOPIC || secrets.PUSHPLUS_TOPIC }}
+          
+          # 方式七：自定义 Webhook（钉钉、Bark、自建服务等）
+          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          CUSTOM_WEBHOOK_BEARER_TOKEN: ${{ secrets.CUSTOM_WEBHOOK_BEARER_TOKEN }}
+          CUSTOM_WEBHOOK_BODY_TEMPLATE: ${{ vars.CUSTOM_WEBHOOK_BODY_TEMPLATE || secrets.CUSTOM_WEBHOOK_BODY_TEMPLATE }}
+          WEBHOOK_VERIFY_SSL: ${{ vars.WEBHOOK_VERIFY_SSL || secrets.WEBHOOK_VERIFY_SSL || 'true' }}
+          
+          # 方式八：Discord
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_MAIN_CHANNEL_ID: ${{ secrets.DISCORD_MAIN_CHANNEL_ID }}
+          
+          # 方式九：飞书云文档
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ secrets.FEISHU_FOLDER_TOKEN }}
+          FEISHU_CHAT_ID: ${{ vars.FEISHU_CHAT_ID || secrets.FEISHU_CHAT_ID }}
+          FEISHU_RECEIVE_ID_TYPE: ${{ vars.FEISHU_RECEIVE_ID_TYPE || secrets.FEISHU_RECEIVE_ID_TYPE }}
+          FEISHU_DOMAIN: ${{ vars.FEISHU_DOMAIN || secrets.FEISHU_DOMAIN }}
+          FEISHU_SEND_AS_FILE: ${{ vars.FEISHU_SEND_AS_FILE || secrets.FEISHU_SEND_AS_FILE }}
+
+          # 方式十：AstrBot
+          ASTRBOT_URL: ${{ secrets.ASTRBOT_URL }}
+          ASTRBOT_TOKEN: ${{ secrets.ASTRBOT_TOKEN }}
+
+          # 方式十一：Server酱3
+          SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
+
+          # 方式十二：Slack
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+
+          # 通知路由策略（留空时保持全部已配置渠道）
+          NOTIFICATION_REPORT_CHANNELS: ${{ vars.NOTIFICATION_REPORT_CHANNELS || secrets.NOTIFICATION_REPORT_CHANNELS }}
+          NOTIFICATION_ALERT_CHANNELS: ${{ vars.NOTIFICATION_ALERT_CHANNELS || secrets.NOTIFICATION_ALERT_CHANNELS }}
+          NOTIFICATION_SYSTEM_ERROR_CHANNELS: ${{ vars.NOTIFICATION_SYSTEM_ERROR_CHANNELS || secrets.NOTIFICATION_SYSTEM_ERROR_CHANNELS }}
+          NOTIFICATION_DEDUP_TTL_SECONDS: ${{ vars.NOTIFICATION_DEDUP_TTL_SECONDS || secrets.NOTIFICATION_DEDUP_TTL_SECONDS || '0' }}
+          NOTIFICATION_COOLDOWN_SECONDS: ${{ vars.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
+          NOTIFICATION_QUIET_HOURS: ${{ vars.NOTIFICATION_QUIET_HOURS || secrets.NOTIFICATION_QUIET_HOURS }}
+          NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE }}
+          NOTIFICATION_MIN_SEVERITY: ${{ vars.NOTIFICATION_MIN_SEVERITY || secrets.NOTIFICATION_MIN_SEVERITY }}
+          NOTIFICATION_DAILY_DIGEST_ENABLED: ${{ vars.NOTIFICATION_DAILY_DIGEST_ENABLED || secrets.NOTIFICATION_DAILY_DIGEST_ENABLED || 'false' }}
+
+          # ==========================================
+          # 自选股配置
+          # ==========================================
+          # 避免直接写入 STOCK_LIST，保留同名 Environment variables 的 runner 环境值。
+          STOCK_LIST_CONFIG: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
+          MARKET_REVIEW_COLOR_SCHEME: ${{ vars.MARKET_REVIEW_COLOR_SCHEME || secrets.MARKET_REVIEW_COLOR_SCHEME || 'green_up' }}
+          
+          # ==========================================
+          # 运行配置 ⬅️ 新增！
+          # ==========================================
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
+          REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || secrets.REPORT_SHOW_LLM_MODEL || 'true' }}
+          SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
+          MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
+          ANALYSIS_DELAY: ${{ vars.ANALYSIS_DELAY || secrets.ANALYSIS_DELAY || '0' }}
+          TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
+          
+          # ==========================================
+          # 系统配置
+          # ==========================================
+          LOG_LEVEL: INFO
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
+          # 筹码分布：默认 false（云端接口不稳定）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
+          ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
+          # 实时行情数据源优先级（腾讯有量比且稳定，推荐首选）
+          # 可选值: tencent, akshare_sina, efinance, akshare_em, tickflow, tushare
+          # 如果有 TickFlow 或 Tushare Pro，可按权限把 tickflow / tushare 放在更靠前位置
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          
+        run: |
+          # 解析自选股配置：
+          # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
+          # 2. 同名 Environment variables 注入的 runner 环境变量（STOCK_LIST）
+          # 3. 最小默认值
+          if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
+            export STOCK_LIST="$STOCK_LIST_CONFIG"
+          elif [ -z "${STOCK_LIST:-}" ]; then
+            export STOCK_LIST="600519"
+          fi
+
+          # 处理 LITELLM YAML 配置文件
+          if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
+            echo "📝 使用 GitHub Actions Secrets/Variables 中的 LITELLM_CONFIG_YAML 配置"
+            # 确保目录存在
+            mkdir -p "$(dirname "$LITELLM_CONFIG")"
+            # 写入配置文件（覆盖已有文件）
+            echo "$LITELLM_CONFIG_YAML" > "$LITELLM_CONFIG"
+            echo "✅ LITELLM 配置文件已写入: $LITELLM_CONFIG"
+          fi
+
+          # 判断运行模式
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          
+          echo "=========================================="
+          echo "🚀 A股自选股智能分析系统"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "🎯 运行模式: $MODE"
+          echo "📊 自选股: $STOCK_LIST"
+          echo "📝 报告类型: $REPORT_TYPE"
+          echo ""
+          echo "=========================================="
+          echo "📋 配置检查"
+          echo "=========================================="
+          echo "【AI 配置】"
+          if [ -n "$LITELLM_CONFIG" ] || [ -n "$LITELLM_API_KEY" ] || [ -n "$LITELLM_MODEL" ] || [ -n "$ANSPIRE_API_KEYS" ]; then
+            echo "  LiteLLM: ✅ 已配置"
+          else
+            echo "  LiteLLM: ❌ 未配置"
+          fi
+          echo "  Gemini API Key: $([ -n "$GEMINI_API_KEY" ] && echo '✅ 已配置' || echo '❌ 未配置')"
+          echo "  DeepSeek Key:   $([ -n "$DEEPSEEK_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Anspire Key:    $([ -n "$ANSPIRE_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  AIHubMix Key:   $([ -n "$AIHUBMIX_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  OpenAI API Key: $([ -n "$OPENAI_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Anthropic Key:  $([ -n "$ANTHROPIC_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo ""
+          echo "【数据源】"
+          echo "  Tushare Token: $([ -n "$TUSHARE_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  TickFlow:      $([ -n "$TICKFLOW_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          if [ -n "$LONGBRIDGE_APP_KEY" ] && [ -n "$LONGBRIDGE_APP_SECRET" ] && [ -n "$LONGBRIDGE_ACCESS_TOKEN" ]; then
+            echo "  Longbridge: ✅ 已配置（Legacy API Key）"
+          elif [ -n "$LONGBRIDGE_OAUTH_CLIENT_ID" ] || { [ -n "$LONGBRIDGE_APP_KEY" ] && [ -z "$LONGBRIDGE_ACCESS_TOKEN" ]; }; then
+            echo "  Longbridge: $([ -n "$LONGBRIDGE_OAUTH_TOKEN_CACHE_B64" ] && echo '✅ 已配置（OAuth token cache）' || echo '🟡 已配置 OAuth client，缺少 token cache')"
+          else
+            echo "  Longbridge: ⚪ 未配置（仅 YFinance 等，无长桥调用）"
+          fi
+          echo ""
+          echo "【搜索引擎】"
+          echo "  Bocha API Keys: $([ -n "$BOCHA_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Tavily API Keys: $([ -n "$TAVILY_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  SerpAPI Keys: $([ -n "$SERPAPI_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  MiniMax API Keys: $([ -n "$MINIMAX_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Brave API Keys: $([ -n "$BRAVE_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  SearXNG Base URLs: $([ -n "$SEARXNG_BASE_URLS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          case "${SEARXNG_PUBLIC_INSTANCES_ENABLED,,}" in
+            0|false|no|off)
+              echo "  SearXNG Public Instances: ❌ 已禁用"
+              ;;
+            "")
+              echo "  SearXNG Public Instances: ❌ 默认关闭"
+              ;;
+            *)
+              echo "  SearXNG Public Instances: ✅ 已启用"
+              ;;
+          esac
+          case "${NEWS_INTEL_AUTO_FETCH_ENABLED,,}" in
+            1|true|yes|on)
+              echo "  本地资讯池自动刷新: ✅ 已启用"
+              ;;
+            *)
+              echo "  本地资讯池自动刷新: ⚪ 未启用"
+              ;;
+          esac
+          echo ""
+          echo "【通知渠道】"
+          echo "  PushPlus: $([ -n "$PUSHPLUS_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  ntfy: $([ -n "$NTFY_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Gotify: $([ -n "$GOTIFY_URL" ] && [ -n "$GOTIFY_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  企业微信: $([ -n "$WECHAT_WEBHOOK_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  钉钉: $( [ -n "$DINGTALK_WEBHOOK_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置' )"
+          echo "  飞书: $( ([ -n "$FEISHU_WEBHOOK_URL" ] || ([ -n "$FEISHU_APP_ID" ] && [ -n "$FEISHU_APP_SECRET" ] && [ -n "$FEISHU_CHAT_ID" ]) ) && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Telegram: $([ -n "$TELEGRAM_BOT_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Discord: $([ -n "$DISCORD_WEBHOOK_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  AstrBot: $([ -n "$ASTRBOT_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Slack: $(([ -n "$SLACK_WEBHOOK_URL" ] || ([ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_CHANNEL_ID" ])) && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "=========================================="
+          echo ""
+          
+          # 构建命令行参数
+          FORCE_RUN_ARG=""
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+            FORCE_RUN_ARG="--force-run"
+            echo "⚡ 已启用强制运行模式（跳过交易日检查）"
+          fi
+
+          # 执行分析
+          if [ "$MODE" = "market-only" ]; then
+            python main.py --market-review $FORCE_RUN_ARG
+          elif [ "$MODE" = "stocks-only" ]; then
+            python main.py --no-market-review $FORCE_RUN_ARG
+          else
+            python main.py $FORCE_RUN_ARG
+          fi
+      
+      - name: 上传分析报告
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: analysis-reports-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+      
+      - name: 显示运行结果
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 分析完成"
+          echo "=========================================="
+          if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+            echo "生成的报告:"
+            ls -la reports/
+          else
+            echo "⚠️ 未生成报告文件"
+          fi
+          echo ""
+          if [ -f "logs/stock_analysis_$(date +%Y%m%d).log" ]; then
+            echo "📜 最近日志（最后 30 行）:"
+            tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "无日志"
+          fi
