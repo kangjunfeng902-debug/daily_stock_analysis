@@ -76,7 +76,7 @@ class TestTavilySearchProvider(unittest.TestCase):
         self.assertEqual(_FakeTavilyClient.search_calls[0]["topic"], "news")
         self.assertEqual(_FakeTavilyClient.search_calls[0]["days"], 3)
         self.assertEqual(_FakeTavilyClient.search_calls[0]["max_results"], 5)
-        self.assertEqual(_FakeTavilyClient.search_calls[0]["search_depth"], "advanced")
+        self.assertEqual(_FakeTavilyClient.search_calls[0]["search_depth"], "basic")
         self.assertEqual(len(resp.results), 1)
         self.assertEqual(resp.results[0].published_date, published_text)
         self.assertEqual(resp.results[0].url, "https://example.com/alibaba-earnings")
@@ -269,6 +269,35 @@ class TestTavilySearchProvider(unittest.TestCase):
         self.assertEqual(_FakeTavilyClient.search_calls[0]["topic"], "news")
         self.assertNotIn("topic", _FakeTavilyClient.search_calls[1])
         self.assertEqual(_FakeTavilyClient.search_calls[2]["topic"], "news")
+
+    def test_a_share_announcement_search_limits_tavily_to_official_domains(self) -> None:
+        published_text = datetime.now(timezone.utc).replace(microsecond=0).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        with self._patch_tavily(
+            {
+                "results": [
+                    {
+                        "title": "贵州茅台发布董事会公告",
+                        "url": "https://www.sse.com.cn/disclosure/example",
+                        "content": "公司披露董事会决议。",
+                        "published_date": published_text,
+                    }
+                ]
+            }
+        ):
+            service = SearchService(
+                tavily_keys=["dummy_key"],
+                searxng_public_instances_enabled=False,
+            )
+            service.search_comprehensive_intel("600519", "贵州茅台", max_searches=4)
+
+        announcement_call = _FakeTavilyClient.search_calls[3]
+        self.assertEqual(announcement_call["topic"], "news")
+        self.assertEqual(
+            announcement_call["include_domains"],
+            ["cninfo.com.cn", "sse.com.cn", "szse.cn", "bse.cn"],
+        )
 
 
 if __name__ == "__main__":

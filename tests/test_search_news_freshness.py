@@ -1858,6 +1858,27 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertIn("direct_company_news", context)
         self.assertIn("标题命中股票代码 600519", context)
 
+    def test_search_context_distinguishes_outage_from_empty_results(self) -> None:
+        unavailable = SearchResponse(
+            query="贵州茅台公告",
+            results=[],
+            provider="Tavily",
+            success=False,
+            error_message="请求超时",
+        )
+        empty = SearchResponse(
+            query="贵州茅台公告",
+            results=[],
+            provider="Tavily",
+            success=True,
+        )
+
+        self.assertEqual(unavailable.outcome, "unavailable")
+        self.assertIn("无法核实", unavailable.to_context())
+        self.assertIn("请求超时", unavailable.to_context())
+        self.assertEqual(empty.outcome, "no_results")
+        self.assertIn("未找到相关结果", empty.to_context())
+
     def test_search_stock_news_brave_locale_matches_market_context(self) -> None:
         """Brave locale should follow Chinese-preferred vs US-stock contexts."""
         fresh_dt = datetime.now(timezone.utc).replace(microsecond=0)

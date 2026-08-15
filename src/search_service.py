@@ -266,10 +266,22 @@ class SearchResponse:
     success: bool = True
     error_message: Optional[str] = None
     search_time: float = 0.0  # 搜索耗时（秒）
+
+    @property
+    def outcome(self) -> str:
+        """Return a stable outcome without conflating outages with empty results."""
+        if not self.success:
+            return "unavailable"
+        if not self.results:
+            return "no_results"
+        return "available"
     
     def to_context(self, max_results: int = 5) -> str:
         """将搜索结果转换为可用于 AI 分析的上下文"""
-        if not self.success or not self.results:
+        if not self.success:
+            reason = f" 原因：{self.error_message}" if self.error_message else ""
+            return f"搜索服务当前不可用，无法核实 '{self.query}' 的相关信息。{reason}"
+        if not self.results:
             return f"搜索 '{self.query}' 未找到相关结果。"
         
         lines = [f"【{self.query} 搜索结果】（来源：{self.provider}）"]
@@ -431,6 +443,7 @@ class TavilySearchProvider(BaseSearchProvider):
         max_results: int,
         days: int = 7,
         topic: Optional[str] = None,
+        include_domains: Optional[List[str]] = None,
     ) -> SearchResponse:
         """执行 Tavily 搜索"""
         try:
@@ -447,10 +460,10 @@ class TavilySearchProvider(BaseSearchProvider):
         try:
             client = TavilyClient(api_key=api_key)
             
-            # 执行搜索（优化：使用advanced深度、限制最近几天）
+            # 基础深度每次消耗 1 credit，优先让免费额度覆盖日常分析。
             search_kwargs: Dict[str, Any] = {
                 "query": query,
-                "search_depth": "advanced",  # advanced 获取更多结果
+                "search_depth": "basic",
                 "max_results": max_results,
                 "include_answer": False,
                 "include_raw_content": False,
@@ -458,6 +471,8 @@ class TavilySearchProvider(BaseSearchProvider):
             }
             if topic is not None:
                 search_kwargs["topic"] = topic
+            if include_domains:
+                search_kwargs["include_domains"] = include_domains
 
             response = client.search(
                 **search_kwargs,
@@ -505,9 +520,10 @@ class TavilySearchProvider(BaseSearchProvider):
         max_results: int = 5,
         days: int = 7,
         topic: Optional[str] = None,
+        include_domains: Optional[List[str]] = None,
     ) -> SearchResponse:
-        """执行 Tavily 搜索，可按调用方选择是否启用新闻 topic。"""
-        if topic is None:
+        """执行 Tavily 搜索，可选择新闻 topic 和可信域名白名单。"""
+        if topic is None and not include_domains:
             return super().search(query, max_results=max_results, days=days)
 
         api_key = self._get_next_key()
@@ -522,7 +538,14 @@ class TavilySearchProvider(BaseSearchProvider):
 
         start_time = time.time()
         try:
-            response = self._do_search(query, api_key, max_results, days=days, topic=topic)
+            response = self._do_search(
+                query,
+                api_key,
+                max_results,
+                days=days,
+                topic=topic,
+                include_domains=include_domains,
+            )
             response.search_time = time.time() - start_time
 
             if response.success:
@@ -2389,7 +2412,7 @@ class SearchService:
         serpapi_keys: Optional[List[str]] = None,
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
-        searxng_public_instances_enabled: bool = True,
+        searxng_public_instances_enabled: bool = False,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
     ):
@@ -2404,7 +2427,7 @@ class SearchService:
             serpapi_keys: SerpAPI Key 列表
             minimax_keys: MiniMax API Key 列表
             searxng_base_urls: SearXNG 实例地址列表（自建无配额兜底）
-            searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
+            searxng_public_instances_enabled: 未配置自建实例时，是否主动使用公共 SearXNG 实例（默认关闭）
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
         """
@@ -4464,6 +4487,12 @@ class SearchService:
                     ),
                     'desc': '公司公告',
                     'tavily_topic': 'news',
+                    'tavily_include_domains': [
+                        'cninfo.com.cn',
+                        'sse.com.cn',
+                        'szse.cn',
+                        'bse.cn',
+                    ],
                     'strict_freshness': True,
                 },
                 {
@@ -4534,12 +4563,15 @@ class SearchService:
                 request_days,
             )
 
-            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
+            if isinstance(provider, TavilySearchProvider) and (
+                dim.get('tavily_topic') or dim.get('tavily_include_domains')
+            ):
                 response = provider.search(
                     dim['query'],
                     max_results=provider_max_results,
                     days=request_days,
                     topic=dim['tavily_topic'],
+                    include_domains=dim.get('tavily_include_domains'),
                 )
             else:
                 response = provider.search(
@@ -4653,8 +4685,11 @@ class SearchService:
                         if r.relevance_reasons:
                             relevance_parts.append(f"依据: {'；'.join(r.relevance_reasons[:3])}")
                         lines.append(f"     关联度: {'; '.join(relevance_parts)}")
+            elif resp.success:
+                lines.append("  搜索成功，但在当前时间窗口内未找到相关信息")
             else:
-                lines.append("  未找到相关信息")
+                reason = f"（{resp.error_message}）" if resp.error_message else ""
+                lines.append(f"  搜索源暂时不可用，不能据此判断没有相关信息{reason}")
         
         return "\n".join(lines)
     
