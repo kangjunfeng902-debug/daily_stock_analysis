@@ -50,7 +50,9 @@ def _make_result(
         support_ma5=support_ma5,
         support_ma10=support_ma10,
         macd_status=macd_status,
+        macd_available=True,
         rsi_status=rsi_status,
+        rsi_available=True,
     )
 
 
@@ -243,10 +245,10 @@ class StockAnalyzerBiasTestCase(unittest.TestCase):
                     trend_strength=75,
                 ),
                 BuySignal.STRONG_BUY,
-                97,
-                signal_key_for_score(97),
-                action_for_score(97),
-                decision_type_for_score(97),
+                91,
+                signal_key_for_score(91),
+                action_for_score(91),
+                decision_type_for_score(91),
             ),
             (
                 _make_result(
@@ -329,5 +331,5 @@ class StockAnalyzerBiasTestCase(unittest.TestCase):
             support_ma10=True,
         )
         self.analyzer._generate_signal(result)
-        self.assertEqual(result.signal_score, 75)
+        self.assertEqual(result.signal_score, 69)
         self.assertEqual(result.buy_signal, BuySignal.WAIT)

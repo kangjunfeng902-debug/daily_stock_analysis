@@ -82,7 +82,7 @@ NEWS_INTEL_AUTO_FETCH_ENABLED=true
 
 该开关代表用户明确同意运行时访问已配置的外部 RSS/Atom/NewsNow HTTP 源；默认关闭是为了避免未确认的外部请求、公开 NewsNow 示例实例压力和分析 prompt 输入变化。
 
-> 说明：该开关只有在实际执行进程环境变量中可见时才会生效。仓库默认随带的 `00-daily-analysis.yml` 为 `env` 采用 allowlist 映射策略，未显式列入映射时，即便在仓库 Variables/Secrets 中设置同名变量也不会注入运行环境，因此默认 workflow 中不会自动接收该开关。若要在仓库自带每日分析任务里开启该能力，请在 workflow 中显式添加该变量透传，或改为本地/Docker 直接配置环境变量运行。
+> 说明：该开关只有在实际执行进程环境变量中可见时才会生效。仓库随带的 `00-daily-analysis.yml` 已显式映射 `NEWS_INTEL_AUTO_FETCH_ENABLED`、保留天数、抓取超时、单源数量和 `NEWSNOW_BASE_URL`，因此可在 GitHub Actions 的 Repository Variables 中配置；默认仍为关闭。若启用公开示例实例，请先阅读上方稳定性与数据准确性风险，生产环境优先使用自建或可控实例。
 
 ## NewsNow 默认源
 

@@ -62,6 +62,8 @@ class BuySignal(Enum):
 
 class MACDStatus(Enum):
     """MACD状态枚举"""
+    UNAVAILABLE = "不可用"
+    NEUTRAL = "中性"
     GOLDEN_CROSS_ZERO = "零轴上金叉"      # DIF上穿DEA，且在零轴上方
     GOLDEN_CROSS = "金叉"                # DIF上穿DEA
     BULLISH = "多头"                    # DIF>DEA>0
@@ -73,6 +75,7 @@ class MACDStatus(Enum):
 
 class RSIStatus(Enum):
     """RSI状态枚举"""
+    UNAVAILABLE = "不可用"
     OVERBOUGHT = "超买"        # RSI > 70
     STRONG_BUY = "强势买入"    # 50 < RSI < 70
     NEUTRAL = "中性"          # 40 <= RSI <= 60
@@ -95,6 +98,7 @@ class TrendAnalysisResult:
     ma10: float = 0.0
     ma20: float = 0.0
     ma60: float = 0.0
+    ma60_available: bool = False
     current_price: float = 0.0
     
     # 乖离率（与 MA5 的偏离度）
@@ -117,19 +121,23 @@ class TrendAnalysisResult:
     macd_dif: float = 0.0          # DIF 快线
     macd_dea: float = 0.0          # DEA 慢线
     macd_bar: float = 0.0           # MACD 柱状图
-    macd_status: MACDStatus = MACDStatus.BULLISH
+    macd_status: MACDStatus = MACDStatus.UNAVAILABLE
+    macd_available: bool = False
     macd_signal: str = ""            # MACD 信号描述
 
     # RSI 指标
     rsi_6: float = 0.0              # RSI(6) 短期
     rsi_12: float = 0.0             # RSI(12) 中期
     rsi_24: float = 0.0             # RSI(24) 长期
-    rsi_status: RSIStatus = RSIStatus.NEUTRAL
+    rsi_status: RSIStatus = RSIStatus.UNAVAILABLE
+    rsi_available: bool = False
     rsi_signal: str = ""              # RSI 信号描述
 
     # 买入信号
     buy_signal: BuySignal = BuySignal.WAIT
     signal_score: int = 0            # 综合评分 0-100
+    signal_score_max: int = 0        # 当前可用指标能够贡献的最高分
+    indicator_coverage_pct: int = 0  # 参与评分的指标权重覆盖率
     signal_reasons: List[str] = field(default_factory=list)
     risk_factors: List[str] = field(default_factory=list)
     
@@ -143,6 +151,7 @@ class TrendAnalysisResult:
             'ma10': self.ma10,
             'ma20': self.ma20,
             'ma60': self.ma60,
+            'ma60_available': self.ma60_available,
             'current_price': self.current_price,
             'bias_ma5': self.bias_ma5,
             'bias_ma10': self.bias_ma10,
@@ -154,17 +163,21 @@ class TrendAnalysisResult:
             'support_ma10': self.support_ma10,
             'buy_signal': self.buy_signal.value,
             'signal_score': self.signal_score,
+            'signal_score_max': self.signal_score_max,
+            'indicator_coverage_pct': self.indicator_coverage_pct,
             'signal_reasons': self.signal_reasons,
             'risk_factors': self.risk_factors,
             'macd_dif': self.macd_dif,
             'macd_dea': self.macd_dea,
             'macd_bar': self.macd_bar,
             'macd_status': self.macd_status.value,
+            'macd_available': self.macd_available,
             'macd_signal': self.macd_signal,
             'rsi_6': self.rsi_6,
             'rsi_12': self.rsi_12,
             'rsi_24': self.rsi_24,
             'rsi_status': self.rsi_status.value,
+            'rsi_available': self.rsi_available,
             'rsi_signal': self.rsi_signal,
         }
 
@@ -237,7 +250,9 @@ class StockTrendAnalyzer:
         result.ma5 = float(latest['MA5'])
         result.ma10 = float(latest['MA10'])
         result.ma20 = float(latest['MA20'])
-        result.ma60 = float(latest.get('MA60', 0))
+        ma60 = latest.get('MA60', np.nan)
+        result.ma60_available = bool(pd.notna(ma60))
+        result.ma60 = float(ma60) if result.ma60_available else 0.0
 
         # 1. 趋势判断
         self._analyze_trend(df, result)
@@ -268,10 +283,7 @@ class StockTrendAnalyzer:
         df['MA5'] = df['close'].rolling(window=5).mean()
         df['MA10'] = df['close'].rolling(window=10).mean()
         df['MA20'] = df['close'].rolling(window=20).mean()
-        if len(df) >= 60:
-            df['MA60'] = df['close'].rolling(window=60).mean()
-        else:
-            df['MA60'] = df['MA20']  # 数据不足时使用 MA20 替代
+        df['MA60'] = df['close'].rolling(window=60).mean()
         return df
 
     def _calculate_macd(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -441,7 +453,7 @@ class StockTrendAnalyzer:
                 result.volume_trend = "缩量上涨，上攻动能不足"
             else:
                 result.volume_status = VolumeStatus.SHRINK_VOLUME_DOWN
-                result.volume_trend = "缩量回调，洗盘特征明显（好）"
+                result.volume_trend = "缩量回撤，抛压暂未明显放大；无法据此判断资金意图"
         else:
             result.volume_status = VolumeStatus.NORMAL
             result.volume_trend = "量能正常"
@@ -489,8 +501,12 @@ class StockTrendAnalyzer:
         - 死叉：DIF 下穿 DEA
         """
         if len(df) < self.MACD_SLOW:
-            result.macd_signal = "数据不足"
+            result.macd_status = MACDStatus.UNAVAILABLE
+            result.macd_available = False
+            result.macd_signal = f"数据不足（至少需要{self.MACD_SLOW}个交易日）"
             return
+
+        result.macd_available = True
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
@@ -519,7 +535,7 @@ class StockTrendAnalyzer:
         # 判断 MACD 状态
         if is_golden_cross and curr_zero > 0:
             result.macd_status = MACDStatus.GOLDEN_CROSS_ZERO
-            result.macd_signal = "⭐ 零轴上金叉，强烈买入信号！"
+            result.macd_signal = "零轴上金叉，动量转强；仍需结合趋势与成交量确认"
         elif is_crossing_up:
             result.macd_status = MACDStatus.CROSSING_UP
             result.macd_signal = "⚡ DIF上穿零轴，趋势转强"
@@ -534,13 +550,13 @@ class StockTrendAnalyzer:
             result.macd_signal = "⚠️ DIF下穿零轴，趋势转弱"
         elif result.macd_dif > 0 and result.macd_dea > 0:
             result.macd_status = MACDStatus.BULLISH
-            result.macd_signal = "✓ 多头排列，持续上涨"
+            result.macd_signal = "DIF与DEA位于零轴上方，动量偏强"
         elif result.macd_dif < 0 and result.macd_dea < 0:
             result.macd_status = MACDStatus.BEARISH
-            result.macd_signal = "⚠ 空头排列，持续下跌"
+            result.macd_signal = "DIF与DEA位于零轴下方，动量偏弱"
         else:
-            result.macd_status = MACDStatus.BULLISH
-            result.macd_signal = " MACD 中性区域"
+            result.macd_status = MACDStatus.NEUTRAL
+            result.macd_signal = "MACD方向未形成一致信号"
 
     def _analyze_rsi(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
         """
@@ -552,8 +568,12 @@ class StockTrendAnalyzer:
         - 40-60：中性区域
         """
         if len(df) < self.RSI_LONG:
-            result.rsi_signal = "数据不足"
+            result.rsi_status = RSIStatus.UNAVAILABLE
+            result.rsi_available = False
+            result.rsi_signal = f"数据不足（至少需要{self.RSI_LONG}个交易日）"
             return
+
+        result.rsi_available = True
 
         latest = df.iloc[-1]
 
@@ -577,10 +597,10 @@ class StockTrendAnalyzer:
             result.rsi_signal = f" RSI中性({rsi_mid:.1f})，震荡整理中"
         elif rsi_mid >= self.RSI_OVERSOLD:
             result.rsi_status = RSIStatus.WEAK
-            result.rsi_signal = f"⚡ RSI弱势({rsi_mid:.1f})，关注反弹"
+            result.rsi_signal = f"RSI弱势({rsi_mid:.1f})，需等待价格企稳确认"
         else:
             result.rsi_status = RSIStatus.OVERSOLD
-            result.rsi_signal = f"⭐ RSI超卖({rsi_mid:.1f}<30)，反弹机会大"
+            result.rsi_signal = f"RSI超卖({rsi_mid:.1f}<30)，可能继续弱势，不能单独视为反转信号"
 
     def _generate_signal(self, result: TrendAnalysisResult) -> None:
         """
@@ -676,7 +696,7 @@ class StockTrendAnalyzer:
         score += vol_score
 
         if result.volume_status == VolumeStatus.SHRINK_VOLUME_DOWN:
-            reasons.append("✅ 缩量回调，主力洗盘")
+            reasons.append("缩量回撤，抛压暂未明显放大，但无法判断资金意图")
         elif result.volume_status == VolumeStatus.HEAVY_VOLUME_DOWN:
             risks.append("⚠️ 放量下跌，注意风险")
 
@@ -694,46 +714,60 @@ class StockTrendAnalyzer:
             MACDStatus.GOLDEN_CROSS: 12,      # 金叉
             MACDStatus.CROSSING_UP: 10,       # 上穿零轴
             MACDStatus.BULLISH: 8,            # 多头
+            MACDStatus.NEUTRAL: 5,            # 中性区域
             MACDStatus.BEARISH: 2,            # 空头
             MACDStatus.CROSSING_DOWN: 0,       # 下穿零轴
             MACDStatus.DEATH_CROSS: 0,        # 死叉
         }
-        macd_score = macd_scores.get(result.macd_status, 5)
-        score += macd_score
+        if result.macd_available:
+            macd_score = macd_scores.get(result.macd_status, 0)
+            score += macd_score
 
-        if result.macd_status in [MACDStatus.GOLDEN_CROSS_ZERO, MACDStatus.GOLDEN_CROSS]:
-            reasons.append(f"✅ {result.macd_signal}")
-        elif result.macd_status in [MACDStatus.DEATH_CROSS, MACDStatus.CROSSING_DOWN]:
-            risks.append(f"⚠️ {result.macd_signal}")
+            if result.macd_status in [MACDStatus.GOLDEN_CROSS_ZERO, MACDStatus.GOLDEN_CROSS]:
+                reasons.append(f"✅ {result.macd_signal}")
+            elif result.macd_status in [MACDStatus.DEATH_CROSS, MACDStatus.CROSSING_DOWN]:
+                risks.append(f"⚠️ {result.macd_signal}")
+            elif result.macd_signal:
+                reasons.append(result.macd_signal)
         else:
-            reasons.append(result.macd_signal)
+            risks.append(f"⚠️ MACD{result.macd_signal}，本项不计分")
 
         # === RSI 评分（10分）===
         rsi_scores = {
-            RSIStatus.OVERSOLD: 10,       # 超卖最佳
+            RSIStatus.OVERSOLD: 4,        # 超卖仅描述位置，不等于反转确认
             RSIStatus.STRONG_BUY: 8,     # 强势
             RSIStatus.NEUTRAL: 5,        # 中性
             RSIStatus.WEAK: 3,            # 弱势
             RSIStatus.OVERBOUGHT: 0,       # 超买最差
         }
-        rsi_score = rsi_scores.get(result.rsi_status, 5)
-        score += rsi_score
+        if result.rsi_available:
+            rsi_score = rsi_scores.get(result.rsi_status, 0)
+            score += rsi_score
 
-        if result.rsi_status in [RSIStatus.OVERSOLD, RSIStatus.STRONG_BUY]:
-            reasons.append(f"✅ {result.rsi_signal}")
-        elif result.rsi_status == RSIStatus.OVERBOUGHT:
-            risks.append(f"⚠️ {result.rsi_signal}")
+            if result.rsi_status == RSIStatus.STRONG_BUY:
+                reasons.append(f"✅ {result.rsi_signal}")
+            elif result.rsi_status in [RSIStatus.OVERBOUGHT, RSIStatus.OVERSOLD]:
+                risks.append(f"⚠️ {result.rsi_signal}")
+            elif result.rsi_signal:
+                reasons.append(result.rsi_signal)
         else:
-            reasons.append(result.rsi_signal)
+            risks.append(f"⚠️ RSI{result.rsi_signal}，本项不计分")
 
         # === 综合判断 ===
         result.signal_score = score
+        result.signal_score_max = 75 + (15 if result.macd_available else 0) + (10 if result.rsi_available else 0)
+        result.indicator_coverage_pct = result.signal_score_max
         result.signal_reasons = reasons
         result.risk_factors = risks
 
         # 生成买入信号（与 canonical decision scale 保持一致）
         score_signal = signal_key_for_score(score)
-        if score_signal == "strong_buy" and result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL]:
+        if result.indicator_coverage_pct < 100 and score_signal in {"strong_buy", "buy"}:
+            result.buy_signal = BuySignal.WAIT
+            result.risk_factors.append(
+                f"⚠️ 指标覆盖率{result.indicator_coverage_pct}%，数据不足以确认买入信号"
+            )
+        elif score_signal == "strong_buy" and result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL]:
             result.buy_signal = BuySignal.STRONG_BUY
         elif score_signal in {"strong_buy", "buy"} and result.trend_status in [
             TrendStatus.STRONG_BULL,
@@ -775,6 +809,7 @@ class StockTrendAnalyzer:
             f"   MA5:  {result.ma5:.2f} (乖离 {result.bias_ma5:+.2f}%)",
             f"   MA10: {result.ma10:.2f} (乖离 {result.bias_ma10:+.2f}%)",
             f"   MA20: {result.ma20:.2f} (乖离 {result.bias_ma20:+.2f}%)",
+            f"   MA60: {result.ma60:.2f}" if result.ma60_available else "   MA60: 不可用（需要60个交易日）",
             f"",
             f"📊 量能分析: {result.volume_status.value}",
             f"   量比(vs5日): {result.volume_ratio_5d:.2f}",
@@ -794,6 +829,8 @@ class StockTrendAnalyzer:
             f"",
             f"🎯 操作建议: {result.buy_signal.value}",
             f"   综合评分: {result.signal_score}/100",
+            f"   可用指标最高分: {result.signal_score_max}/100",
+            f"   指标覆盖率: {result.indicator_coverage_pct}%",
         ]
 
         if result.signal_reasons:

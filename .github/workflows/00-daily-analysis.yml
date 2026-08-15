@@ -309,6 +309,12 @@ jobs:
           BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
           SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS }}
           SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || secrets.SEARXNG_PUBLIC_INSTANCES_ENABLED }}
+          # 本地资讯池（默认不开启自动外部请求；在 Variables 中显式设为 true 后启用）
+          NEWS_INTEL_AUTO_FETCH_ENABLED: ${{ vars.NEWS_INTEL_AUTO_FETCH_ENABLED || secrets.NEWS_INTEL_AUTO_FETCH_ENABLED }}
+          NEWS_INTEL_RETENTION_DAYS: ${{ vars.NEWS_INTEL_RETENTION_DAYS || secrets.NEWS_INTEL_RETENTION_DAYS }}
+          NEWS_INTEL_FETCH_TIMEOUT_SEC: ${{ vars.NEWS_INTEL_FETCH_TIMEOUT_SEC || secrets.NEWS_INTEL_FETCH_TIMEOUT_SEC }}
+          NEWS_INTEL_MAX_ITEMS_PER_SOURCE: ${{ vars.NEWS_INTEL_MAX_ITEMS_PER_SOURCE || secrets.NEWS_INTEL_MAX_ITEMS_PER_SOURCE }}
+          NEWSNOW_BASE_URL: ${{ vars.NEWSNOW_BASE_URL || secrets.NEWSNOW_BASE_URL }}
           
           # ==========================================
           # 通知渠道（可同时配置多个，全部推送）
@@ -497,10 +503,18 @@ jobs:
               echo "  SearXNG Public Instances: ❌ 已禁用"
               ;;
             "")
-              echo "  SearXNG Public Instances: ✅ 默认开启"
+              echo "  SearXNG Public Instances: ❌ 默认关闭"
               ;;
             *)
               echo "  SearXNG Public Instances: ✅ 已启用"
+              ;;
+          esac
+          case "${NEWS_INTEL_AUTO_FETCH_ENABLED,,}" in
+            1|true|yes|on)
+              echo "  本地资讯池自动刷新: ✅ 已启用"
+              ;;
+            *)
+              echo "  本地资讯池自动刷新: ⚪ 未启用"
               ;;
           esac
           echo ""

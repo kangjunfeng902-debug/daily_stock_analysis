@@ -706,6 +706,15 @@ class TestValidateStructuredNotification:
         search_issue = next(i for i in info if "搜索引擎" in i.message)
         assert search_issue.field == "BOCHA_API_KEYS"
 
+    def test_public_searxng_is_opt_in_by_default(self):
+        with patch.dict(
+            "os.environ",
+            {"ENV_FILE": "/private/tmp/dsa-nonexistent-env"},
+            clear=True,
+        ):
+            cfg = Config._load_from_env()
+        assert cfg.searxng_public_instances_enabled is False
+
     def test_searxng_configured_no_search_info(self):
         """When searxng_base_urls is configured, no 'unconfigured search engine' info."""
         cfg = _make_config(searxng_base_urls=["https://searx.example.org"])
